@@ -14,6 +14,11 @@ After 10,000 runs, "Annie won 2,300 of them" means about a 23% chance.
 This is called a bootstrap Monte Carlo, because it resamples real history
 instead of assuming a bell curve.
 
+Stocks that listed less than a year ago (like SpaceX, June 2026) have gaps in
+their history. Those gaps are filled with random moves from the stock's own
+trading days, so its volatility is kept; it just doesn't move "together" with
+the others on those filled days.
+
 Limits (worth saying out loud in a presentation): the past year may not look
 like the next few weeks, and news like earnings can move a stock far more
 than a typical day.
@@ -56,11 +61,18 @@ def simulate_final_returns(
     if days_left <= 0 or not tickers:
         return pd.DataFrame(np.tile(current, (n_sims, 1)), columns=tickers)
 
-    # Rows = past days, columns = tickers. A missing value means the stock
-    # didn't trade (e.g. it listed recently); treat that day as "no change".
-    history = daily_returns[tickers].fillna(0.0).to_numpy(dtype=float)
-
     rng = np.random.default_rng(seed)
+
+    # Rows = past days, columns = tickers. A missing value means the stock
+    # wasn't trading yet (e.g. SpaceX only listed in June 2026). Treating those
+    # days as "no change" would make a new stock look far calmer than it is,
+    # so each gap is filled with a random real move from that stock's OWN history.
+    history = daily_returns[tickers].to_numpy(dtype=float).copy()
+    for column in range(history.shape[1]):
+        gaps = np.isnan(history[:, column])
+        observed = history[~gaps, column]
+        if gaps.any():
+            history[gaps, column] = rng.choice(observed, size=gaps.sum()) if observed.size else 0.0
     # For every simulation, pick `days_left` random past days.
     picks = rng.integers(0, len(history), size=(n_sims, days_left))
     # Growth of $1 over those days, for every ticker at once.

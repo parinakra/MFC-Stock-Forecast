@@ -57,6 +57,15 @@ def main() -> None:
     final = simulate_final_returns(pd.Series({"A": 0.05, "B": 0.02}), history, days_left=0, n_sims=10)
     check("no days left keeps current return", float(final["A"].iloc[0]), 0.05)
 
+    # A recently listed stock (missing early history) must keep its volatility:
+    # gaps are filled from its own moves, not treated as "no change".
+    import numpy as np
+    new_stock = [None] * 40 + [0.05, -0.05] * 5
+    history = pd.DataFrame({"OLD": [0.0] * 50, "NEW": new_stock}, dtype=float)
+    final = simulate_final_returns(pd.Series({"OLD": 0.0, "NEW": 0.0}), history, days_left=1, n_sims=2000)
+    share_flat = float((np.abs(final["NEW"]) < 1e-12).mean())
+    check("new stock never gets a fake 0% day", share_flat, 0.0)
+
     print("\nAll analytics checks passed.")
 
 
