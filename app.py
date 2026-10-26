@@ -1,4 +1,4 @@
-"""Streamlit front door for the MFC Stock Monitor.
+"""Streamlit front door for MFC Stock Forecast.
 
 Run this file with:
     streamlit run app.py
@@ -27,8 +27,8 @@ from src.risk import risk_table
 HIGHLIGHT_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#e87ba4"]
 MAX_HIGHLIGHTED = len(HIGHLIGHT_COLORS)
 
-st.set_page_config(page_title="MFC Stock Monitor V2", layout="wide")
-st.title("MFC Stock Monitor V2")
+st.set_page_config(page_title="MFC Stock Forecast", layout="wide")
+st.title("MFC Stock Forecast")
 st.caption("Personal analytics edition · UCI Math Finance Club contest · Oct 20 – Nov 20, 2026")
 
 now = now_et()

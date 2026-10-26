@@ -1,8 +1,8 @@
-# MFC Stock Monitor V2
+# MFC Stock Forecast
 
 A live stock-competition dashboard with risk analytics and a Monte Carlo win-probability model, built in Python with Streamlit, pandas, NumPy, and Yahoo Finance data.
 
-Version 1 is the leaderboard I run for the **UCI Math Finance Club** 5-week stock contest (Oct 20 – Nov 20, 2026): each member nominates one stock, and the highest total return wins. Version 2 is my personal analytics edition that builds on it.
+Version 1 is the leaderboard I run for the **UCI Math Finance Club** 5-week stock contest (Oct 20 – Nov 20, 2026): each member nominates one stock, and the highest total return wins. MFC Stock Forecast is my personal analytics project built on top of it: it forecasts each pick's chance of winning, logs those forecasts every trading day, and evaluates them when the contest ends.
 
 ## Features
 
