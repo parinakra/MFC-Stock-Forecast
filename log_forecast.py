@@ -1,73 +1,62 @@
-"""Save today's Monte Carlo forecast to data/forecast_log.csv.
+# Logs the official Monte Carlo forecast every weekday after the US market closes,
+# then saves data/forecast_log.csv back to this repository.
+#
+# 21:30 UTC = 5:30pm ET in daylight time (until Nov 1) and 4:30pm ET after that,
+# so it always runs after the 4pm close. GitHub can start scheduled runs a few
+# minutes late; that's fine.
+#
+# To run it by hand: GitHub -> Actions tab -> "Log daily forecast" -> Run workflow.
 
-Run it from the project folder, ideally after the market closes (4pm ET / 1pm PT):
+name: Log daily forecast
 
-    python log_forecast.py            # log today's forecast
-    python log_forecast.py --force    # replace today's entry (only if a run was broken)
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:
 
-GitHub Actions also runs this automatically every weekday after the close
-(see .github/workflows/log_forecast.yml).
-"""
+permissions:
+  contents: write
 
-import argparse
-import sys
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
 
-from src.config import BENCHMARK_TICKER
-from src.data_store import load_picks
-from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, current_returns, days_left_for, run_forecast
-from src.forecast_log import LOG_PATH, append_forecast, build_log_rows, market_status
-from src.market_data import fetch_year_of_closes
-from src.prices import now_et, snapshot_for_tickers
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
+      - name: Install packages
+        run: pip install -r requirements.txt
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Log today's contest forecast.")
-    parser.add_argument("--force", action="store_true", help="replace today's entry if it already exists")
-    args = parser.parse_args()
+      - name: Check the math
+        run: |
+          python tests/test_portfolio.py
+          python tests/test_analytics.py
+          python tests/test_forecast_log.py
 
-    now = now_et()
-    if market_status(now) == "weekend":
-        print(f"{now:%A %b %d} is a weekend. Nothing to log.")
-        return 0
+      - name: Log today's forecast (retries if Yahoo is busy)
+        run: |
+          for attempt in 1 2 3; do
+            python log_forecast.py && exit 0
+            echo "Attempt $attempt failed. Waiting 60 seconds..."
+            sleep 60
+          done
+          exit 1
 
-    picks = load_picks()
-    tickers = sorted({p["ticker"] for p in picks} | {BENCHMARK_TICKER})
-
-    print("Downloading prices from Yahoo Finance...")
-    snapshot = snapshot_for_tickers(tickers)
-    year = fetch_year_of_closes(tickers)
-    if year.empty:
-        print("ERROR: no price history came back from Yahoo Finance. Try again in a few minutes.")
-        return 1
-
-    current = current_returns(picks, snapshot, year)
-    missing = [p["ticker"] for p in picks if p["ticker"] not in current.index]
-    if missing:
-        print(f"Warning: no price history for {', '.join(missing)}. They are left out of this forecast.")
-
-    days_left = days_left_for(now)
-    forecast = run_forecast(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED)
-
-    rows = build_log_rows(
-        forecast,
-        student_of={p["ticker"]: p["student"] for p in picks},
-        now=now,
-        days_left=days_left,
-        model=MODEL_VERSION,
-        n_sims=DEFAULT_SIMS,
-        seed=DEFAULT_SEED,
-        spy_return=snapshot.get(BENCHMARK_TICKER, {}).get("total_return"),
-    )
-    saved, message = append_forecast(rows, force=args.force)
-    print(message)
-
-    print(f"\nTop 5 as of {now:%b %d %H:%M} ET ({days_left} trading days left):")
-    for _, row in rows.head(5).iterrows():
-        print(f"  {row['student']:<7} {row['ticker']:<5}  win {row['win_prob']:6.1%}   so far {row['return_so_far']:+.2%}")
-    if saved:
-        print(f"\nLog file: {LOG_PATH}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+      - name: Save the log to the repository
+        run: |
+          git config user.name "forecast-bot"
+          git config user.email "forecast-bot@users.noreply.github.com"
+          if [ ! -f data/forecast_log.csv ]; then
+            echo "No forecast log yet (weekend, or nothing logged today). Nothing to save."
+            exit 0
+          fi
+          git add data/forecast_log.csv
+          if git diff --cached --quiet; then
+            echo "No new forecast to save."
+          else
+            git commit -m "Forecast log: $(date -u +%Y-%m-%d)"
+            git push
+          fi
