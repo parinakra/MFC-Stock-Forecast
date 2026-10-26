@@ -4,8 +4,6 @@ Run this file with:
     streamlit run app.py
 """
 
-from datetime import timedelta
-
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -20,7 +18,8 @@ from src.config import (
 from src.data_store import load_picks, unique_tickers
 from src.portfolio import format_return
 from src.market_data import fetch_quotes, fetch_year_of_closes
-from src.monte_carlo import outcome_ranges, simulate_final_returns, trading_days_left, win_probabilities
+from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, current_returns, days_left_for, run_forecast
+from src.forecast_log import append_forecast, build_log_rows, load_log, market_status
 from src.prices import competition_has_ended, competition_has_started, now_et, snapshot_for_tickers
 from src.risk import risk_table
 
@@ -441,6 +440,11 @@ with perf_tab:
             )
 
 # ---------- 9. Monte Carlo ----------
+@st.cache_data(ttl=PRICE_CACHE_SECONDS)
+def cached_forecast(current: pd.Series, year_closes: pd.DataFrame, days_left: int, n_sims: int, seed: int) -> pd.DataFrame:
+    return run_forecast(current, year_closes, days_left, n_sims=n_sims, seed=seed)
+
+
 with mc_tab:
     st.subheader("Who's most likely to win?")
     st.write(
@@ -456,40 +460,35 @@ with mc_tab:
     if year_mc.empty:
         st.info("Needs a year of price history from Yahoo Finance.")
     else:
-        today = now.date()
-        if not started:
-            days_left = trading_days_left(COMPETITION_START.date() - timedelta(days=1), COMPETITION_END.date())
-        else:
-            days_left = trading_days_left(today, COMPETITION_END.date())
+        days_left = days_left_for(now)
+        current = current_returns(picks, snapshot, year_mc)
 
-        n_sims = st.select_slider("Number of simulations", options=[1_000, 5_000, 10_000, 50_000], value=10_000)
-
-        current = pd.Series(
-            {t: (snapshot.get(t, {}).get("total_return") or 0.0) for t in pick_tickers if t in year_mc.columns}
+        n_sims = st.select_slider(
+            "Number of simulations", options=[1_000, 5_000, 10_000, 50_000], value=DEFAULT_SIMS
         )
-        daily = year_mc[current.index].pct_change().iloc[1:]
-
-        @st.cache_data(ttl=PRICE_CACHE_SECONDS)
-        def run_simulation(current_values: tuple, tickers: tuple, days: int, sims: int, history: pd.DataFrame):
-            final = simulate_final_returns(pd.Series(current_values, index=tickers), history, days, n_sims=sims)
-            return win_probabilities(final), outcome_ranges(final)
-
-        odds, ranges = run_simulation(tuple(current.values), tuple(current.index), days_left, n_sims, daily)
+        forecast = cached_forecast(current, year_mc, days_left, n_sims, DEFAULT_SEED)
 
         c1, c2 = st.columns(2)
         c1.metric("Trading days left", days_left)
-        favorite = odds.idxmax()
-        c2.metric("Favorite to win", student_of[favorite], f"{odds.max():.0%} chance · {favorite}", delta_color="off")
+        favorite = forecast.index[0]
+        c2.metric(
+            "Favorite to win",
+            student_of[favorite],
+            f"{forecast['win_prob'].iloc[0]:.0%} chance · {favorite}",
+            delta_color="off",
+        )
 
         results = pd.DataFrame(
             {
-                "Student": [student_of[t] for t in odds.index],
-                "Ticker": odds.index,
-                "Win chance": odds.values,
-                "Return so far": current[odds.index].values,
+                "Student": [student_of[t] for t in forecast.index],
+                "Ticker": forecast.index,
+                "Win chance": forecast["win_prob"].values,
+                "Return so far": forecast["return_so_far"].values,
+                "Bad case (5th pct)": forecast["p05"].values,
+                "Typical (median)": forecast["median"].values,
+                "Good case (95th pct)": forecast["p95"].values,
             }
-        ).join(ranges, on="Ticker")
-        results = results.sort_values("Win chance", ascending=False).reset_index(drop=True)
+        )
 
         bars = (
             alt.Chart(results)
@@ -511,14 +510,11 @@ with mc_tab:
         st.altair_chart((bars + labels).properties(height=26 * len(results) + 40), use_container_width=True)
 
         st.subheader("Range of likely finishes")
-        st.dataframe(
-            results.style.format(
-                fmt_pct, subset=["Return so far", "Bad case (5th pct)", "Typical (median)", "Good case (95th pct)"]
-            ).format(lambda v: f"{v:.1%}", subset=["Win chance"]),
-            hide_index=True,
-            use_container_width=True,
-            height=36 * (len(results) + 1) + 3,
-        )
+        display_results = results.copy()
+        for column in ["Return so far", "Bad case (5th pct)", "Typical (median)", "Good case (95th pct)"]:
+            display_results[column] = results[column].map(fmt_pct)
+        display_results["Win chance"] = results["Win chance"].map(lambda v: f"{v:.1%}")
+        st.dataframe(display_results, hide_index=True, use_container_width=True, height=36 * (len(results) + 1) + 3)
 
         with st.expander("How the simulation works (and its limits)"):
             st.markdown(
@@ -532,4 +528,91 @@ with mc_tab:
 **Limits:** the past year may not look like the next few weeks; earnings announcements and news can move
 a stock far more than a typical day; and future dividends aren't included. Treat these as rough odds, not predictions.
                 """
+            )
+
+        # ---------- 10. Forecast log ----------
+        st.divider()
+        st.subheader("Forecast history")
+        st.write(
+            "Every trading day, the official forecast "
+            f"({DEFAULT_SIMS:,} simulations, model `{MODEL_VERSION}`) is saved to `data/forecast_log.csv`. "
+            "On Nov 20 this shows whether the model saw the winner coming, and how early."
+        )
+
+        if st.button("Log today's forecast"):
+            official = cached_forecast(current, year_mc, days_left, DEFAULT_SIMS, DEFAULT_SEED)
+            rows = build_log_rows(
+                official,
+                student_of=student_of,
+                now=now,
+                days_left=days_left,
+                model=MODEL_VERSION,
+                n_sims=DEFAULT_SIMS,
+                seed=DEFAULT_SEED,
+                spy_return=benchmark_return,
+            )
+            saved, message = append_forecast(rows)
+            (st.success if saved else st.info)(message)
+
+        if market_status(now) == "intraday":
+            st.caption("The market is open right now. The official daily forecast is logged after the 4pm ET close.")
+
+        log = load_log()
+        if log.empty:
+            st.info(
+                "No forecasts logged yet. Click **Log today's forecast** after the market closes, "
+                "or let the daily GitHub Action do it."
+            )
+        else:
+            days_logged = log["forecast_date"].nunique()
+            latest_day = log["forecast_date"].max()
+            st.caption(f"{days_logged} day(s) logged · latest: {latest_day}")
+
+            # Follow the students the model currently likes most.
+            latest = log[log["forecast_date"] == latest_day].sort_values("win_prob", ascending=False)
+            top = latest["student"].head(MAX_HIGHLIGHTED).tolist()
+            follow = st.multiselect(
+                f"Students to follow (up to {MAX_HIGHLIGHTED})",
+                options=sorted(log["student"].dropna().unique()),
+                default=top,
+                max_selections=MAX_HIGHLIGHTED,
+            )
+            history = log[log["student"].isin(follow)].copy()
+            # One evenly spaced point per trading day (weekends are skipped, not drawn as gaps).
+            history["day"] = pd.to_datetime(history["forecast_date"]).dt.strftime("%b %d")
+            day_order = sorted(history["forecast_date"].unique())
+            day_labels = [pd.Timestamp(d).strftime("%b %d") for d in day_order]
+
+            if days_logged >= 2:
+                odds_chart = (
+                    alt.Chart(history)
+                    .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=40, filled=True))
+                    .encode(
+                        x=alt.X("day:O", title=None, sort=day_labels, axis=alt.Axis(labelAngle=0, grid=False)),
+                        y=alt.Y("win_prob:Q", title="Chance of winning", axis=alt.Axis(format=".0%")),
+                        color=alt.Color(
+                            "student:N",
+                            title=None,
+                            scale=alt.Scale(domain=follow, range=HIGHLIGHT_COLORS[: len(follow)]),
+                            legend=alt.Legend(orient="top"),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("student:N", title="Student"),
+                            alt.Tooltip("ticker:N"),
+                            alt.Tooltip("day:N", title="Date"),
+                            alt.Tooltip("win_prob:Q", title="Win chance", format=".1%"),
+                            alt.Tooltip("return_so_far:Q", title="Return so far", format="+.2%"),
+                        ],
+                    )
+                    .properties(height=360)
+                )
+                st.altair_chart(odds_chart, use_container_width=True)
+            else:
+                st.info("The chart of odds over time appears once there are at least 2 days in the log.")
+
+            st.download_button(
+                "Download the full log (CSV)",
+                data=log.to_csv(index=False).encode("utf-8"),
+                file_name="forecast_log.csv",
+                mime="text/csv",
             )
