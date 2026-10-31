@@ -1,9 +1,12 @@
-"""Save today's Monte Carlo forecast to data/forecast_log.csv.
+"""Save today's Monte Carlo forecasts to data/forecast_log.csv.
+
+Every model (see src/models.py) is logged each trading day, so on Nov 20 we
+can score them against each other on the same days.
 
 Run it from the project folder, ideally after the market closes (4pm ET / 1pm PT):
 
-    python log_forecast.py            # log today's forecast
-    python log_forecast.py --force    # replace today's entry (only if a run was broken)
+    python log_forecast.py            # log today's forecasts
+    python log_forecast.py --force    # replace today's entries (only if a run was broken)
 
 GitHub Actions also runs this automatically every weekday after the close
 (see .github/workflows/log_forecast.yml).
@@ -14,15 +17,16 @@ import sys
 
 from src.config import BENCHMARK_TICKER
 from src.data_store import load_picks
-from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, current_returns, days_left_for, run_forecast
+from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, OFFICIAL_MODEL, current_returns, days_left_for, run_forecast
 from src.forecast_log import LOG_PATH, append_forecast, build_log_rows, market_status
 from src.market_data import fetch_year_of_closes
+from src.models import MODELS
 from src.prices import now_et, snapshot_for_tickers
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Log today's contest forecast.")
-    parser.add_argument("--force", action="store_true", help="replace today's entry if it already exists")
+    parser = argparse.ArgumentParser(description="Log today's contest forecasts.")
+    parser.add_argument("--force", action="store_true", help="replace today's entries if they already exist")
     args = parser.parse_args()
 
     now = now_et()
@@ -46,26 +50,32 @@ def main() -> int:
         print(f"Warning: no price history for {', '.join(missing)}. They are left out of this forecast.")
 
     days_left = days_left_for(now)
-    forecast = run_forecast(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED)
+    student_of = {p["ticker"]: p["student"] for p in picks}
+    spy_return = snapshot.get(BENCHMARK_TICKER, {}).get("total_return")
 
-    rows = build_log_rows(
-        forecast,
-        student_of={p["ticker"]: p["student"] for p in picks},
-        now=now,
-        days_left=days_left,
-        model=MODEL_VERSION,
-        n_sims=DEFAULT_SIMS,
-        seed=DEFAULT_SEED,
-        spy_return=snapshot.get(BENCHMARK_TICKER, {}).get("total_return"),
-    )
-    saved, message = append_forecast(rows, force=args.force)
-    print(message)
+    for key, (name, version, _, _) in MODELS.items():
+        forecast = run_forecast(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED, model=key)
+        rows = build_log_rows(
+            forecast,
+            student_of=student_of,
+            now=now,
+            days_left=days_left,
+            model=version,
+            n_sims=DEFAULT_SIMS,
+            seed=DEFAULT_SEED,
+            spy_return=spy_return,
+        )
+        _, message = append_forecast(rows, force=args.force)
+        top = rows.iloc[0]
+        print(f"{name:<20} favorite {top['student']:<6} {top['ticker']:<5} {top['win_prob']:6.1%}   {message}")
 
-    print(f"\nTop 5 as of {now:%b %d %H:%M} ET ({days_left} trading days left):")
-    for _, row in rows.head(5).iterrows():
+        if key == OFFICIAL_MODEL:
+            official = rows
+
+    print(f"\nOfficial model, top 5 as of {now:%b %d %H:%M} ET ({days_left} trading days left):")
+    for _, row in official.head(5).iterrows():
         print(f"  {row['student']:<7} {row['ticker']:<5}  win {row['win_prob']:6.1%}   so far {row['return_so_far']:+.2%}")
-    if saved:
-        print(f"\nLog file: {LOG_PATH}")
+    print(f"\nLog file: {LOG_PATH}")
     return 0
 
 

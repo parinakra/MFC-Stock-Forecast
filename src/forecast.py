@@ -1,20 +1,22 @@
 """One place that turns prices into a Monte Carlo forecast.
 
-Both the app (Monte Carlo tab) and the daily logging script (log_forecast.py)
-use these functions, so the forecast you see on screen is exactly the
-forecast that gets written to the log.
+Both the app and the daily logging script (log_forecast.py) use these
+functions, so the forecast you see on screen is exactly the forecast that
+gets written to the log.
 """
 
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-from src.config import COMPETITION_END, COMPETITION_START
-from src.monte_carlo import outcome_ranges, simulate_final_returns, trading_days_left, win_probabilities
+from src.config import BENCHMARK_TICKER, COMPETITION_END, COMPETITION_START
+from src.models import MODELS
+from src.monte_carlo import outcome_ranges, trading_days_left, win_probabilities
 
-# Bump this whenever the model changes (e.g. "bootstrap-v2", "fat-tails-v1"),
-# so old and new forecasts in the log can be told apart.
-MODEL_VERSION = "bootstrap-v1"
+# The "official" model: the one shown on the Monte Carlo tab and quoted in posts.
+OFFICIAL_MODEL = "bootstrap"
+# Kept for older code that refers to it.
+MODEL_VERSION = MODELS[OFFICIAL_MODEL][1]
 DEFAULT_SIMS = 10_000
 # A fixed seed makes the simulation repeatable: same inputs -> same odds.
 DEFAULT_SEED = 42
@@ -46,15 +48,32 @@ def run_forecast(
     days_left: int,
     n_sims: int = DEFAULT_SIMS,
     seed: int = DEFAULT_SEED,
+    model: str = OFFICIAL_MODEL,
 ) -> pd.DataFrame:
-    """Win chance and likely-finish range for every ticker.
+    """Win chance and likely-finish range for every ticker, using one model.
 
     Returns one row per ticker with columns:
     return_so_far, win_prob, p05, median, p95
     """
-    daily = year_closes[current.index].pct_change().iloc[1:]
-    final = simulate_final_returns(current, daily, days_left, n_sims=n_sims, seed=seed)
+    daily = year_closes.pct_change().iloc[1:]
+    market = daily[BENCHMARK_TICKER] if BENCHMARK_TICKER in daily.columns else None
+    simulate = MODELS[model][2]
+    final = simulate(current, daily[current.index], days_left, n_sims=n_sims, seed=seed, market=market)
     ranges = outcome_ranges(final)
     ranges.columns = ["p05", "median", "p95"]
     result = pd.DataFrame({"return_so_far": current, "win_prob": win_probabilities(final)}).join(ranges)
     return result.sort_values("win_prob", ascending=False)
+
+
+def compare_models(
+    current: pd.Series,
+    year_closes: pd.DataFrame,
+    days_left: int,
+    n_sims: int = DEFAULT_SIMS,
+    seed: int = DEFAULT_SEED,
+) -> pd.DataFrame:
+    """Win chance under every model, side by side: one row per ticker, one column per model."""
+    columns = {
+        key: run_forecast(current, year_closes, days_left, n_sims, seed, model=key)["win_prob"] for key in MODELS
+    }
+    return pd.DataFrame(columns)

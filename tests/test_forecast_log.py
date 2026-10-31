@@ -53,12 +53,17 @@ def main() -> None:
         saved, _ = append_forecast(sample_rows(tuesday_close), path)
         check("next day is added", saved and load_log(path)["forecast_date"].nunique() == 2)
 
+        other_model = sample_rows(tuesday_close)
+        other_model["model"] = "other-v1"
+        saved, _ = append_forecast(other_model, path)
+        check("a different model on the same day IS added", saved and len(load_log(path)) == 6)
+
         saved, _ = append_forecast(sample_rows(datetime(2026, 10, 24, 17, 0, tzinfo=ET)), path)
         check("weekend forecast is refused", not saved)
 
         saved, _ = append_forecast(sample_rows(monday_close), path, force=True)
         log = load_log(path)
-        check("--force replaces just that day", saved and len(log) == 4 and log["forecast_date"].nunique() == 2)
+        check("--force replaces just that day and model", saved and len(log) == 6 and log["forecast_date"].nunique() == 2)
 
     # Same inputs + same seed = same odds (reproducible).
     history = pd.DataFrame({"AAA": [100 * 1.01**i for i in range(60)], "BBB": [100 + (i % 3) for i in range(60)]})

@@ -18,7 +18,17 @@ from src.config import (
 from src.data_store import load_picks, unique_tickers
 from src.portfolio import format_return
 from src.market_data import fetch_quotes, fetch_year_of_closes
-from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, current_returns, days_left_for, run_forecast
+from src.forecast import (
+    DEFAULT_SEED,
+    DEFAULT_SIMS,
+    MODEL_VERSION,
+    OFFICIAL_MODEL,
+    compare_models,
+    current_returns,
+    days_left_for,
+    run_forecast,
+)
+from src.models import MODELS
 from src.forecast_log import append_forecast, build_log_rows, load_log, market_status
 from src.prices import competition_has_ended, competition_has_started, now_et, snapshot_for_tickers
 from src.risk import risk_table
@@ -126,8 +136,8 @@ if benchmark_return is not None and not ranked.empty:
 else:
     col3.metric("Beating the market", "—")
 
-leaderboard_tab, chart_tab, quotes_tab, perf_tab, mc_tab = st.tabs(
-    ["Leaderboard", "Returns over time", "Quotes & valuation", "1-year performance", "Monte Carlo"]
+leaderboard_tab, chart_tab, quotes_tab, perf_tab, mc_tab, models_tab = st.tabs(
+    ["Leaderboard", "Returns over time", "Quotes & valuation", "1-year performance", "Monte Carlo", "Model comparison"]
 )
 
 # ---------- 5. Leaderboard table ----------
@@ -441,8 +451,10 @@ with perf_tab:
 
 # ---------- 9. Monte Carlo ----------
 @st.cache_data(ttl=PRICE_CACHE_SECONDS)
-def cached_forecast(current: pd.Series, year_closes: pd.DataFrame, days_left: int, n_sims: int, seed: int) -> pd.DataFrame:
-    return run_forecast(current, year_closes, days_left, n_sims=n_sims, seed=seed)
+def cached_forecast(
+    current: pd.Series, year_closes: pd.DataFrame, days_left: int, n_sims: int, seed: int, model: str = OFFICIAL_MODEL
+) -> pd.DataFrame:
+    return run_forecast(current, year_closes, days_left, n_sims=n_sims, seed=seed, model=model)
 
 
 with mc_tab:
@@ -539,25 +551,28 @@ a stock far more than a typical day; and future dividends aren't included. Treat
             "On Nov 20 this shows whether the model saw the winner coming, and how early."
         )
 
-        if st.button("Log today's forecast"):
-            official = cached_forecast(current, year_mc, days_left, DEFAULT_SIMS, DEFAULT_SEED)
-            rows = build_log_rows(
-                official,
-                student_of=student_of,
-                now=now,
-                days_left=days_left,
-                model=MODEL_VERSION,
-                n_sims=DEFAULT_SIMS,
-                seed=DEFAULT_SEED,
-                spy_return=benchmark_return,
-            )
-            saved, message = append_forecast(rows)
-            (st.success if saved else st.info)(message)
+        if st.button("Log today's forecasts (all models)"):
+            for key, (name, version, _, _) in MODELS.items():
+                model_forecast = cached_forecast(current, year_mc, days_left, DEFAULT_SIMS, DEFAULT_SEED, key)
+                rows = build_log_rows(
+                    model_forecast,
+                    student_of=student_of,
+                    now=now,
+                    days_left=days_left,
+                    model=version,
+                    n_sims=DEFAULT_SIMS,
+                    seed=DEFAULT_SEED,
+                    spy_return=benchmark_return,
+                )
+                saved, message = append_forecast(rows)
+                (st.success if saved else st.info)(message)
 
         if market_status(now) == "intraday":
             st.caption("The market is open right now. The official daily forecast is logged after the 4pm ET close.")
 
-        log = load_log()
+        full_log = load_log()
+        # The chart follows the official model; the other models are compared on the next tab.
+        log = full_log[full_log["model"] == MODEL_VERSION]
         if log.empty:
             st.info(
                 "No forecasts logged yet. Click **Log today's forecast** after the market closes, "
@@ -612,7 +627,150 @@ a stock far more than a typical day; and future dividends aren't included. Treat
 
             st.download_button(
                 "Download the full log (CSV)",
-                data=log.to_csv(index=False).encode("utf-8"),
+                data=full_log.to_csv(index=False).encode("utf-8"),
                 file_name="forecast_log.csv",
                 mime="text/csv",
+            )
+
+
+# ---------- 11. Model comparison ----------
+# Five colors + five shapes, so models can be told apart without relying on color alone.
+MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
+MODEL_SHAPES = ["circle", "square", "triangle-up", "diamond", "cross"]
+
+
+@st.cache_data(ttl=PRICE_CACHE_SECONDS)
+def cached_comparison(current: pd.Series, year_closes: pd.DataFrame, days_left: int) -> pd.DataFrame:
+    return compare_models(current, year_closes, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED)
+
+
+with models_tab:
+    st.subheader("Do different models agree?")
+    st.write(
+        "Every model answers the same question, *who is most likely to finish first?*, but makes a different "
+        "assumption about how stocks move. If they agree, the forecast is robust. Where they disagree, the "
+        "answer depends on the assumption. Risk teams call this **model risk**."
+    )
+
+    try:
+        year_cmp = cached_year(tuple(sorted(set(pick_tickers) | {BENCHMARK_TICKER})))
+    except Exception:
+        year_cmp = pd.DataFrame()
+
+    if year_cmp.empty:
+        st.info("Needs a year of price history from Yahoo Finance.")
+    else:
+        days_left_cmp = days_left_for(now)
+        current_cmp = current_returns(picks, snapshot, year_cmp)
+        with st.spinner("Running 5 models × 10,000 simulations..."):
+            odds = cached_comparison(current_cmp, year_cmp, days_left_cmp)
+
+        names = {key: MODELS[key][0] for key in MODELS}
+        model_order = [names[key] for key in MODELS]
+
+        # Summary: each model's favorite.
+        summary = []
+        for key in MODELS:
+            column = odds[key].sort_values(ascending=False)
+            summary.append(
+                {
+                    "Model": names[key],
+                    "Assumes": MODELS[key][3],
+                    "Favorite": f"{student_of[column.index[0]]} ({column.index[0]})",
+                    "Favorite's chance": f"{column.iloc[0]:.1%}",
+                    "Top 3 combined": f"{column.head(3).sum():.0%}",
+                }
+            )
+        st.dataframe(pd.DataFrame(summary), hide_index=True, use_container_width=True)
+
+        favorites = {odds[key].idxmax() for key in MODELS}
+        if len(favorites) == 1:
+            st.success(f"All five models pick the same favorite: **{student_of[favorites.pop()]}**")
+        else:
+            st.warning(
+                f"The models disagree on the favorite: {len(favorites)} different picks lead under different "
+                "assumptions."
+            )
+
+        # Dot plot: one row per student, one dot per model, a grey bar showing the spread.
+        long = odds.copy()
+        long.columns = [names[c] for c in long.columns]
+        long["average"] = long[model_order].mean(axis=1)
+        long["low"] = long[model_order].min(axis=1)
+        long["high"] = long[model_order].max(axis=1)
+        long["Student"] = [f"{student_of[t]} ({t})" for t in long.index]
+        show_n = st.slider("Students shown (highest average odds first)", 5, len(long), min(12, len(long)))
+        shown = long.sort_values("average", ascending=False).head(show_n)
+        order = shown["Student"].tolist()
+
+        spread = (
+            alt.Chart(shown)
+            .mark_rule(color="#c3c2b7", strokeWidth=6, strokeCap="round", opacity=0.6)
+            .encode(
+                y=alt.Y("Student:N", sort=order, title=None),
+                x=alt.X("low:Q", title="Chance of finishing first", axis=alt.Axis(format=".0%", tickCount=6)),
+                x2="high:Q",
+            )
+        )
+        dots_data = shown.melt(id_vars=["Student"], value_vars=model_order, var_name="Model", value_name="Win chance")
+        dots = (
+            alt.Chart(dots_data)
+            .mark_point(size=90, filled=True, opacity=0.95, stroke="white", strokeWidth=1)
+            .encode(
+                y=alt.Y("Student:N", sort=order, title=None),
+                x="Win chance:Q",
+                color=alt.Color(
+                    "Model:N",
+                    scale=alt.Scale(domain=model_order, range=MODEL_COLORS),
+                    legend=alt.Legend(orient="top", title=None, symbolSize=120),
+                ),
+                shape=alt.Shape(
+                    "Model:N",
+                    scale=alt.Scale(domain=model_order, range=MODEL_SHAPES),
+                    legend=alt.Legend(orient="top", title=None, symbolSize=120),
+                ),
+                tooltip=["Student:N", "Model:N", alt.Tooltip("Win chance:Q", format=".1%")],
+            )
+        )
+        st.altair_chart((spread + dots).properties(height=32 * len(shown) + 60), use_container_width=True)
+        st.caption("Each shape is one model. The grey bar spans the lowest to the highest estimate. Longer bar = more disagreement.")
+
+        # Biggest disagreements, in words.
+        long["Disagreement"] = long["high"] - long["low"]
+        most = long.sort_values("Disagreement", ascending=False).iloc[0]
+        high_model = most[model_order].astype(float).idxmax()
+        low_model = most[model_order].astype(float).idxmin()
+        st.markdown(
+            f"**Biggest disagreement:** {most['Student']}, from {most['low']:.1%} (*{low_model}*) "
+            f"to {most['high']:.1%} (*{high_model}*)."
+        )
+
+        st.subheader("All picks, all models")
+        table = long.sort_values("average", ascending=False)[["Student"] + model_order + ["Disagreement"]].copy()
+        for column in model_order:
+            table[column] = table[column].map(lambda v: f"{v:.1%}")
+        table["Disagreement"] = table["Disagreement"].map(lambda v: f"{v * 100:.1f} pts")
+        st.dataframe(table, hide_index=True, use_container_width=True, height=36 * (len(table) + 1) + 3)
+
+        with st.expander("What each model assumes, and why it changes the odds"):
+            st.markdown(
+                """
+- **Historical days** (the original): replays random real trading days. Keeps real correlations and real
+  extreme days, but only the ones that happened in the past year.
+- **Bell curve** (GBM): the textbook model. Uses each stock's average, volatility and correlations, but assumes
+  extreme days are rare. Usually *underestimates* the chance of a huge move.
+- **Fat tails** (Student-t): same averages, volatility and correlations as the bell curve, but extreme days
+  happen more often. Any difference from the bell curve comes purely from the tails.
+- **Historical weeks** (block bootstrap): replays real 5-day stretches, so a wild week stays wild. Captures
+  "volatility clustering", which single-day sampling breaks up.
+- **Market + own noise** (factor model): each stock follows the S&P 500 by its beta, plus its own independent
+  noise. Stocks are linked *only* through the market, so if chip stocks really move together, this model
+  will spread the odds out more than the others.
+
+**How to read it:** fat tails cut both ways. Extreme days become more common, but with the same overall volatility,
+ordinary days get a little *calmer*. Whether that helps the leader or the underdogs depends on how far ahead the
+leader is and how many days are left. That's exactly why it's worth running the models side by side.
+
+Every model is logged daily, so on Nov 20 we can score them on the same days and see which one was closest.
+                """
             )

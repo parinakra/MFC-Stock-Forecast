@@ -8,7 +8,7 @@ Why keep a log?
   late to recreate what it thought on Oct 27.
 
 Rules that keep the log honest:
-  1. One official forecast per trading day.
+  1. One forecast per model per trading day.
   2. Never edit old rows. If a day was logged, it stays as it was, even if
      the model later turns out to be wrong. (--force exists only for fixing a
      run that was clearly broken, and it replaces that one day.)
@@ -95,20 +95,22 @@ def append_forecast(rows: pd.DataFrame, path: Path = LOG_PATH, force: bool = Fal
         return False, "Nothing to log: the forecast is empty."
 
     day = rows["forecast_date"].iloc[0]
+    model = rows["model"].iloc[0]
     status = rows["market_status"].iloc[0]
     if status == "weekend":
         return False, f"{day} is a weekend. Markets are closed, so there's nothing new to forecast."
 
     log = load_log(path)
-    if day in set(log["forecast_date"]):
+    same = (log["forecast_date"] == day) & (log["model"] == model)
+    if same.any():
         if not force:
-            return False, f"A forecast for {day} is already in the log. Old forecasts are never overwritten."
-        log = log[log["forecast_date"] != day]
+            return False, f"A {model} forecast for {day} is already in the log. Old forecasts are never overwritten."
+        log = log[~same]
 
     combined = pd.concat([log, rows], ignore_index=True) if not log.empty else rows
-    combined = combined.sort_values(["forecast_date", "win_prob"], ascending=[True, False])
+    combined = combined.sort_values(["forecast_date", "model", "win_prob"], ascending=[True, True, False])
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False)
 
     note = " (intraday: prices will still move before the close)" if status != "after close" else ""
-    return True, f"Saved the forecast for {day}{note}."
+    return True, f"Saved the {model} forecast for {day}{note}."
