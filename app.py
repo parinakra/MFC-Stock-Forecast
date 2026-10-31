@@ -85,19 +85,26 @@ problems = [f"{t} ({student_of[t]})" for t in pick_tickers if snapshot.get(t, {}
 if problems:
     st.error("No price data: " + ", ".join(problems))
 
-# ---------- Main table: leaderboard + win odds ----------
+# ---------- Leaderboard data + headline numbers ----------
 rows = []
 for t in pick_tickers:
     data = snapshot.get(t, {})
     total = data.get("total_return")
+
+    def pct(value):
+        return value * 100 if value is not None else None
+
     rows.append(
         {
             "Student": student_of[t],
-            "Ticker": t,
             "Company": company_of[t],
-            "Return": total * 100 if total is not None else None,
+            "Ticker": t,
+            "Start (Oct 20 open)": data.get("start_price"),
+            "Current": data.get("current_price"),
+            "Price return": pct(data.get("price_return")),
+            "Dividends": pct(data.get("dividend_return")),
+            "Return": pct(total),
             "vs S&P 500": (total - spy) * 100 if total is not None and spy is not None else None,
-            "Win chance": forecast["win_prob"].get(t, 0.0) * 100 if not forecast.empty else None,
         }
     )
 board = pd.DataFrame(rows).sort_values("Return", ascending=False, na_position="last").reset_index(drop=True)
@@ -115,27 +122,151 @@ k3.metric(BENCHMARK_NAME, f"{spy:+.2%}" if spy is not None else "—")
 if spy is not None and not ranked.empty:
     k4.metric("Beating the S&P", f"{int((ranked['vs S&P 500'] > 0).sum())} of {len(ranked)}")
 
-max_odds = float(board["Win chance"].max() or 1)
-st.dataframe(
-    board,
-    hide_index=True,
-    use_container_width=True,
-    height=35 * (len(board) + 1) + 3,
-    column_config={
-        "Rank": st.column_config.NumberColumn(width="small"),
-        "Return": st.column_config.NumberColumn(format="%+.2f%%"),
-        "vs S&P 500": st.column_config.NumberColumn(format="%+.2f%%"),
-        "Win chance": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=max_odds),
-    },
+# ---------- Tabs ----------
+(leaderboard_tab, returns_tab, quotes_tab, perf_tab, mc_tab, models_tab) = st.tabs(
+    ["Leaderboard", "Returns over time", "Quotes & valuation", "1-year performance", "Monte Carlo", "Model comparison"]
 )
 
-# ---------- Everything else, collapsed ----------
+with leaderboard_tab:
+    money = st.column_config.NumberColumn(format="$%.2f")
+    pct_col = st.column_config.NumberColumn(format="%+.2f%%")
+    st.dataframe(
+        board,
+        hide_index=True,
+        use_container_width=True,
+        height=35 * (len(board) + 1) + 3,
+        column_config={
+            "Rank": st.column_config.NumberColumn(width="small"),
+            "Start (Oct 20 open)": money,
+            "Current": money,
+            "Price return": pct_col,
+            "Dividends": pct_col,
+            "Return": pct_col,
+            "vs S&P 500": pct_col,
+        },
+    )
+
 log = load_log()
 official_log = log[log["model"] == MODEL_VERSION] if not log.empty else log
 
-with st.expander("Win chance over time"):
+with returns_tab:
+    series = []
+    for t in pick_tickers + [BENCHMARK_TICKER]:
+        s = snapshot.get(t, {}).get("series")
+        if s is not None:
+            label = BENCHMARK_NAME if t == BENCHMARK_TICKER else f"{student_of[t]} · {t}"
+            series += [{"Date": d, "Pick": label, "Return": v} for d, v in s.items()]
+    if series:
+        lines = pd.DataFrame(series)
+        top_picks = [f"{r.Student} · {r.Ticker}" for r in ranked.head(TOP_N).itertuples()]
+        chosen = st.multiselect("Highlight", sorted(lines["Pick"].unique()), default=top_picks, max_selections=TOP_N)
+        x = alt.X("Date:T", title=None, axis=alt.Axis(format="%b %d", tickCount="day"))
+        y = alt.Y("Return:Q", title="Total return", axis=alt.Axis(format="+.0%"))
+        chart = alt.layer(
+            alt.Chart(lines[~lines["Pick"].isin(chosen + [BENCHMARK_NAME])])
+            .mark_line(strokeWidth=1, color="#c3c2b7").encode(x=x, y=y, detail="Pick:N"),
+            alt.Chart(lines[lines["Pick"] == BENCHMARK_NAME])
+            .mark_line(strokeWidth=2, strokeDash=[6, 4], color=MARKET_GREY).encode(x=x, y=y),
+            alt.Chart(lines[lines["Pick"].isin(chosen)])
+            .mark_line(strokeWidth=2.5)
+            .encode(x=x, y=y, color=alt.Color("Pick:N", title=None, scale=alt.Scale(domain=chosen, range=COLORS[: len(chosen)]),
+                                            legend=alt.Legend(orient="top")),
+                    tooltip=["Pick:N", alt.Tooltip("Date:T", format="%b %d"), alt.Tooltip("Return:Q", format="+.2%")]),
+        ).properties(height=360)
+        st.altair_chart(chart, use_container_width=True)
+
+with quotes_tab:
+    try:
+        quotes = get_quotes(tuple(pick_tickers))
+    except Exception:
+        quotes = pd.DataFrame()
+    if not quotes.empty:
+        quotes.insert(0, "Student", quotes["Ticker"].map(student_of))
+        numeric = ["Price", "Bid", "Ask", "Spread (%)", "P/E (trailing)", "P/E (forward)", "Market cap", "Beta",
+                   "52-wk low", "52-wk high"]
+        quotes[numeric] = quotes[numeric].apply(pd.to_numeric, errors="coerce")  # blanks instead of "None"
+        quotes["Spread (%)"] = quotes["Spread (%)"] * 100
+        quotes["Market cap ($B)"] = quotes["Market cap"] / 1e9
+        cols = ["Student", "Ticker", "Price", "Bid", "Ask", "Spread (%)", "P/E (trailing)", "P/E (forward)",
+                "Market cap ($B)", "Beta", "52-wk low", "52-wk high", "Sector"]
+        def fmt(spec):
+            return lambda v: "—" if pd.isna(v) else spec.format(v)
+
+        shown = quotes[cols].copy()
+        for c, spec in {
+            "Price": "${:,.2f}", "Bid": "${:,.2f}", "Ask": "${:,.2f}", "52-wk low": "${:,.2f}", "52-wk high": "${:,.2f}",
+            "Spread (%)": "{:.3f}%", "P/E (trailing)": "{:.1f}", "P/E (forward)": "{:.1f}",
+            "Market cap ($B)": "{:,.1f}", "Beta": "{:.2f}",
+        }.items():
+            shown[c] = shown[c].map(fmt(spec))
+        shown["Sector"] = shown["Sector"].fillna("—")
+        st.dataframe(shown, hide_index=True, use_container_width=True, height=35 * (len(shown) + 1) + 3)
+
+with perf_tab:
+    if not year.empty:
+        available = [t for t in pick_tickers if t in year.columns]
+        chosen = st.multiselect(
+            "Compare", available, default=[t for t in ranked["Ticker"].head(3)], max_selections=TOP_N,
+            format_func=lambda t: f"{student_of[t]} · {t}",
+        )
+        growth = year / year.apply(lambda col: col.dropna().iloc[0]) * 100
+        growth.index.name = "Date"
+        long = growth.reset_index().melt(id_vars="Date", var_name="Ticker", value_name="Value").dropna()
+        x = alt.X("Date:T", title=None, axis=alt.Axis(format="%b %Y", tickCount="month"))
+        y = alt.Y("Value:Q", title="$100 invested a year ago", axis=alt.Axis(format="$,.0f"), scale=alt.Scale(zero=False))
+        chart = alt.layer(
+            alt.Chart(long[long["Ticker"] == BENCHMARK_TICKER])
+            .mark_line(strokeWidth=2, strokeDash=[6, 4], color=MARKET_GREY).encode(x=x, y=y),
+            alt.Chart(long[long["Ticker"].isin(chosen)])
+            .mark_line(strokeWidth=2)
+            .encode(x=x, y=y, color=alt.Color("Ticker:N", title=None, scale=alt.Scale(domain=chosen, range=COLORS[: len(chosen)]),
+                                            legend=alt.Legend(orient="top")),
+                    tooltip=["Ticker:N", alt.Tooltip("Date:T", format="%b %d, %Y"), alt.Tooltip("Value:Q", format="$,.2f")]),
+        ).properties(height=380)
+        st.altair_chart(chart, use_container_width=True)
+    if not year.empty:
+        risk = risk_table(year)
+        risk.insert(0, "Student", risk["Ticker"].map(lambda t: student_of.get(t, BENCHMARK_NAME)))
+        for c in ["1-year return", "Volatility (yearly)", "Max drawdown", "Best day", "Worst day"]:
+            risk[c] = risk[c] * 100
+        pct = st.column_config.NumberColumn(format="%+.1f%%")
+        st.dataframe(
+            risk.sort_values("Volatility (yearly)", ascending=False),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "1-year return": pct, "Max drawdown": pct, "Best day": pct, "Worst day": pct,
+                "Volatility (yearly)": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+
+with mc_tab:
+    if not forecast.empty:
+        bars_data = pd.DataFrame(
+            {"Pick": [f"{student_of[t]} · {t}" for t in forecast.index], "Win chance": forecast["win_prob"].values}
+        )
+        bars = alt.Chart(bars_data).mark_bar(color=COLORS[0], cornerRadiusEnd=4, height=16).encode(
+            y=alt.Y("Pick:N", sort="-x", title=None),
+            x=alt.X("Win chance:Q", title="Win chance", axis=alt.Axis(format=".0%", tickCount=5)),
+            tooltip=["Pick:N", alt.Tooltip("Win chance:Q", format=".1%")],
+        )
+        labels = bars.mark_text(align="left", dx=4, color=MARKET_GREY).encode(text=alt.Text("Win chance:Q", format=".1%"))
+        st.altair_chart((bars + labels).properties(height=26 * len(bars_data) + 40), use_container_width=True)
+    if not forecast.empty:
+        finish = forecast[["return_so_far", "p05", "median", "p95", "win_prob"]].copy() * 100
+        finish.columns = ["Return now", "Bad case (5%)", "Typical", "Good case (95%)", "Win chance"]
+        finish.insert(0, "Student", [student_of[t] for t in finish.index])
+        finish.insert(1, "Ticker", finish.index)
+        st.dataframe(
+            finish,
+            hide_index=True,
+            use_container_width=True,
+            column_config={c: st.column_config.NumberColumn(format="%+.1f%%") for c in finish.columns[2:6]}
+            | {"Win chance": st.column_config.NumberColumn(format="%.1f%%")},
+        )
+    st.subheader("Win chance over time")
     if official_log["forecast_date"].nunique() < 2 if not official_log.empty else True:
-        st.write("Needs at least 2 logged days.")
+        st.caption("Needs at least 2 logged days.")
     else:
         latest_day = official_log["forecast_date"].max()
         default = (
@@ -161,11 +292,31 @@ with st.expander("Win chance over time"):
         )
         st.altair_chart(chart, use_container_width=True)
 
-with st.expander("Model comparison"):
+with models_tab:
     if year.empty:
         st.write("No price history.")
     else:
         odds = get_model_comparison(current, year, days_left)
+        favorites = pd.DataFrame(
+            [
+                {
+                    "Model": MODELS[k][0],
+                    "Favorite": f"{student_of[odds[k].idxmax()]} · {odds[k].idxmax()}",
+                    "Win chance": odds[k].max() * 100,
+                    "Top 3 combined": odds[k].nlargest(3).sum() * 100,
+                }
+                for k in MODELS
+            ]
+        )
+        st.dataframe(
+            favorites,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Win chance": st.column_config.NumberColumn(format="%.1f%%"),
+                "Top 3 combined": st.column_config.NumberColumn(format="%.0f%%"),
+            },
+        )
         names = [MODELS[k][0] for k in MODELS]
         table = odds.copy() * 100
         table.columns = names
@@ -201,88 +352,3 @@ with st.expander("Model comparison"):
             column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in names}
             | {"Spread": st.column_config.NumberColumn(format="%.1f pts")},
         )
-
-with st.expander("Likely finish range"):
-    if not forecast.empty:
-        finish = forecast[["return_so_far", "p05", "median", "p95", "win_prob"]].copy() * 100
-        finish.columns = ["Return now", "Bad case (5%)", "Typical", "Good case (95%)", "Win chance"]
-        finish.insert(0, "Student", [student_of[t] for t in finish.index])
-        finish.insert(1, "Ticker", finish.index)
-        st.dataframe(
-            finish,
-            hide_index=True,
-            use_container_width=True,
-            column_config={c: st.column_config.NumberColumn(format="%+.1f%%") for c in finish.columns[2:6]}
-            | {"Win chance": st.column_config.NumberColumn(format="%.1f%%")},
-        )
-
-with st.expander("Returns since Oct 20"):
-    series = []
-    for t in pick_tickers + [BENCHMARK_TICKER]:
-        s = snapshot.get(t, {}).get("series")
-        if s is not None:
-            label = BENCHMARK_NAME if t == BENCHMARK_TICKER else f"{student_of[t]} · {t}"
-            series += [{"Date": d, "Pick": label, "Return": v} for d, v in s.items()]
-    if series:
-        lines = pd.DataFrame(series)
-        top_picks = [f"{r.Student} · {r.Ticker}" for r in ranked.head(TOP_N).itertuples()]
-        chosen = st.multiselect("Highlight", sorted(lines["Pick"].unique()), default=top_picks, max_selections=TOP_N)
-        x = alt.X("Date:T", title=None, axis=alt.Axis(format="%b %d"))
-        y = alt.Y("Return:Q", title="Total return", axis=alt.Axis(format="+.0%"))
-        chart = alt.layer(
-            alt.Chart(lines[~lines["Pick"].isin(chosen + [BENCHMARK_NAME])])
-            .mark_line(strokeWidth=1, color="#c3c2b7").encode(x=x, y=y, detail="Pick:N"),
-            alt.Chart(lines[lines["Pick"] == BENCHMARK_NAME])
-            .mark_line(strokeWidth=2, strokeDash=[6, 4], color=MARKET_GREY).encode(x=x, y=y),
-            alt.Chart(lines[lines["Pick"].isin(chosen)])
-            .mark_line(strokeWidth=2.5)
-            .encode(x=x, y=y, color=alt.Color("Pick:N", title=None, scale=alt.Scale(domain=chosen, range=COLORS[: len(chosen)]),
-                                            legend=alt.Legend(orient="top")),
-                    tooltip=["Pick:N", alt.Tooltip("Date:T", format="%b %d"), alt.Tooltip("Return:Q", format="+.2%")]),
-        ).properties(height=360)
-        st.altair_chart(chart, use_container_width=True)
-
-with st.expander("Quotes & valuation"):
-    try:
-        quotes = get_quotes(tuple(pick_tickers))
-    except Exception:
-        quotes = pd.DataFrame()
-    if not quotes.empty:
-        quotes.insert(0, "Student", quotes["Ticker"].map(student_of))
-        quotes["Spread (%)"] = quotes["Spread (%)"] * 100
-        quotes["Market cap ($B)"] = quotes["Market cap"] / 1e9
-        cols = ["Student", "Ticker", "Price", "Bid", "Ask", "Spread (%)", "P/E (trailing)", "P/E (forward)",
-                "Market cap ($B)", "Beta", "52-wk low", "52-wk high", "Sector"]
-        money = st.column_config.NumberColumn(format="$%.2f")
-        st.dataframe(
-            quotes[cols],
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Price": money, "Bid": money, "Ask": money, "52-wk low": money, "52-wk high": money,
-                "Spread (%)": st.column_config.NumberColumn(format="%.3f%%"),
-                "P/E (trailing)": st.column_config.NumberColumn(format="%.1f"),
-                "P/E (forward)": st.column_config.NumberColumn(format="%.1f"),
-                "Market cap ($B)": st.column_config.NumberColumn(format="%.1f"),
-                "Beta": st.column_config.NumberColumn(format="%.2f"),
-            },
-        )
-
-with st.expander("Risk (past 12 months)"):
-    if not year.empty:
-        risk = risk_table(year)
-        risk.insert(0, "Student", risk["Ticker"].map(lambda t: student_of.get(t, BENCHMARK_NAME)))
-        for c in ["1-year return", "Volatility (yearly)", "Max drawdown", "Best day", "Worst day"]:
-            risk[c] = risk[c] * 100
-        pct = st.column_config.NumberColumn(format="%+.1f%%")
-        st.dataframe(
-            risk.sort_values("Volatility (yearly)", ascending=False),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "1-year return": pct, "Max drawdown": pct, "Best day": pct, "Worst day": pct,
-                "Volatility (yearly)": st.column_config.NumberColumn(format="%.1f%%"),
-            },
-        )
-
-st.caption("Win chance: 10,000 Monte Carlo simulations replaying real trading days from the past year. Not investment advice.")
