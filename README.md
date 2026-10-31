@@ -6,16 +6,9 @@ Version 1 is the leaderboard I run for the **UCI Math Finance Club** 5-week stoc
 
 ## Features
 
-| Tab | What it shows |
-| --- | --- |
-| **Leaderboard** | Ranked by total return (price return + dividends), leader highlighted, each pick vs the S&P 500 |
-| **Returns over time** | Daily total return for every pick; highlight up to 5, market shown as a dashed line |
-| **Quotes & valuation** | Live bid, ask, bid–ask spread ($ and %), trailing and forward P/E, market cap, beta, 52-week range |
-| **1-year performance** | Growth of $100 over the past year vs the S&P 500; volatility, max drawdown, best/worst day |
-| **Monte Carlo** | Probability each member wins, plus bad / typical / good case finishes, from 10,000 simulated futures; **forecast history** chart of how the odds changed day by day |
-| **Model comparison** | The same forecast under five different models, side by side, with where they agree and disagree (model risk) |
+A one-page dashboard: the leaderboard with each pick's **return**, **return vs the S&P 500** and **Monte Carlo win chance**, plus headline numbers (leader, favorite, S&P 500, picks beating the market).
 
-A **ticker check** flags any symbol Yahoo Finance doesn't recognize.
+Collapsed sections underneath: win chance over time (from the daily log), the five-model comparison, likely finish ranges, returns since Oct 20, quotes and valuation (P/E, bid/ask spread), and 12-month risk stats.
 
 ## Methods
 
@@ -47,7 +40,7 @@ Limits: the past year may not resemble the next few weeks, earnings and news can
 
 | Path | Purpose |
 | --- | --- |
-| `app.py` | Streamlit web app (all six tabs) |
+| `app.py` | Streamlit dashboard |
 | `data/picks.csv` | Members and tickers |
 | `src/config.py` | Contest dates, benchmark ticker, file paths |
 | `src/data_store.py` | Reads `picks.csv` |
