@@ -277,13 +277,14 @@ with mc_tab:
     if official_log["forecast_date"].nunique() < 2 if not official_log.empty else True:
         st.caption("Needs at least 2 logged days.")
     else:
+        official_log = official_log.assign(Pick=official_log["student"] + " · " + official_log["ticker"])
         latest_day = official_log["forecast_date"].max()
         default = (
             official_log[official_log["forecast_date"] == latest_day]
-            .sort_values("win_prob", ascending=False)["student"].head(TOP_N).tolist()
+            .sort_values("win_prob", ascending=False)["Pick"].head(TOP_N).tolist()
         )
-        follow = st.multiselect("Students", sorted(official_log["student"].unique()), default=default, max_selections=TOP_N)
-        hist = official_log[official_log["student"].isin(follow)].copy()
+        follow = st.multiselect("Picks", sorted(official_log["Pick"].unique()), default=default, max_selections=TOP_N)
+        hist = official_log[official_log["Pick"].isin(follow)].copy()
         hist["Day"] = pd.to_datetime(hist["forecast_date"]).dt.strftime("%b %d")
         day_order = [pd.Timestamp(d).strftime("%b %d") for d in sorted(hist["forecast_date"].unique())]
         chart = (
@@ -292,9 +293,9 @@ with mc_tab:
             .encode(
                 x=alt.X("Day:O", sort=day_order, title=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("win_prob:Q", title="Win chance", axis=alt.Axis(format=".0%")),
-                color=alt.Color("student:N", title=None, scale=alt.Scale(domain=follow, range=COLORS[: len(follow)]),
+                color=alt.Color("Pick:N", title=None, scale=alt.Scale(domain=follow, range=COLORS[: len(follow)]),
                                 legend=alt.Legend(orient="top")),
-                tooltip=[alt.Tooltip("student:N", title="Student"), "ticker:N", "Day:N",
+                tooltip=["Pick:N", "Day:N",
                          alt.Tooltip("win_prob:Q", title="Win chance", format=".1%")],
             )
             .properties(height=320)
