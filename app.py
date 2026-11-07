@@ -8,8 +8,9 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from src.config import BENCHMARK_NAME, BENCHMARK_TICKER, PRICE_CACHE_SECONDS
+from src.config import BENCHMARK_NAME, BENCHMARK_TICKER, COMPETITION_END, PRICE_CACHE_SECONDS
 from src.data_store import load_picks
+from src.earnings import fetch_earnings_events
 from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, compare_models, current_returns, days_left_for, run_forecast
 from src.forecast_log import load_log
 from src.market_data import fetch_quotes, fetch_year_of_closes
@@ -18,8 +19,8 @@ from src.prices import now_et, snapshot_for_tickers
 from src.risk import risk_table
 
 # Colorblind-checked series colors, always used in this order.
-COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
-SHAPES = ["circle", "square", "triangle-up", "diamond", "cross"]
+COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]
+SHAPES = ["circle", "square", "triangle-up", "diamond", "cross", "triangle-down"]
 MARKET_GREY = "#52514e"
 TOP_N = 5
 
@@ -43,8 +44,16 @@ def get_forecast(current: pd.Series, year: pd.DataFrame, days_left: int) -> pd.D
 
 
 @st.cache_data(ttl=PRICE_CACHE_SECONDS)
-def get_model_comparison(current: pd.Series, year: pd.DataFrame, days_left: int) -> pd.DataFrame:
-    return compare_models(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED)
+def get_model_comparison(current: pd.Series, year: pd.DataFrame, days_left: int, events: dict | None) -> pd.DataFrame:
+    return compare_models(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED, events=events)
+
+
+@st.cache_data(ttl=6 * 3600)  # earnings dates rarely change
+def get_earnings(tickers: tuple[str, ...], today, end) -> dict | None:
+    try:
+        return fetch_earnings_events(list(tickers), today, end)
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=PRICE_CACHE_SECONDS)
@@ -296,7 +305,9 @@ with models_tab:
     if year.empty:
         st.write("No price history.")
     else:
-        odds = get_model_comparison(current, year, days_left)
+        events = get_earnings(tuple(pick_tickers), now.date(), COMPETITION_END.date())
+        odds = get_model_comparison(current, year, days_left, events)
+        earnings_day = {t: e["next_reaction"] for t, e in (events or {}).get("tickers", {}).items() if e.get("next_reaction")}
         favorites = pd.DataFrame(
             [
                 {
@@ -323,6 +334,7 @@ with models_tab:
         table["Spread"] = table.max(axis=1) - table.min(axis=1)
         table.insert(0, "Student", [student_of[t] for t in table.index])
         table.insert(1, "Ticker", table.index)
+        table["Earnings day"] = [str(earnings_day.get(t, "—")) for t in table.index]
         table = table.sort_values(names[0], ascending=False)
 
         top = table.head(10)

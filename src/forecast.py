@@ -49,6 +49,7 @@ def run_forecast(
     n_sims: int = DEFAULT_SIMS,
     seed: int = DEFAULT_SEED,
     model: str = OFFICIAL_MODEL,
+    events: dict | None = None,
 ) -> pd.DataFrame:
     """Win chance and likely-finish range for every ticker, using one model.
 
@@ -58,7 +59,7 @@ def run_forecast(
     daily = year_closes.pct_change().iloc[1:]
     market = daily[BENCHMARK_TICKER] if BENCHMARK_TICKER in daily.columns else None
     simulate = MODELS[model][2]
-    final = simulate(current, daily[current.index], days_left, n_sims=n_sims, seed=seed, market=market)
+    final = simulate(current, daily[current.index], days_left, n_sims=n_sims, seed=seed, market=market, events=events)
     ranges = outcome_ranges(final)
     ranges.columns = ["p05", "median", "p95"]
     result = pd.DataFrame({"return_so_far": current, "win_prob": win_probabilities(final)}).join(ranges)
@@ -71,9 +72,11 @@ def compare_models(
     days_left: int,
     n_sims: int = DEFAULT_SIMS,
     seed: int = DEFAULT_SEED,
+    events: dict | None = None,
 ) -> pd.DataFrame:
     """Win chance under every model, side by side: one row per ticker, one column per model."""
     columns = {
-        key: run_forecast(current, year_closes, days_left, n_sims, seed, model=key)["win_prob"] for key in MODELS
+        key: run_forecast(current, year_closes, days_left, n_sims, seed, model=key, events=events)["win_prob"]
+        for key in MODELS
     }
     return pd.DataFrame(columns)

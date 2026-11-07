@@ -15,8 +15,9 @@ GitHub Actions also runs this automatically every weekday after the close
 import argparse
 import sys
 
-from src.config import BENCHMARK_TICKER
+from src.config import BENCHMARK_TICKER, COMPETITION_END
 from src.data_store import load_picks
+from src.earnings import fetch_earnings_events
 from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, OFFICIAL_MODEL, current_returns, days_left_for, run_forecast
 from src.forecast_log import LOG_PATH, append_forecast, build_log_rows, market_status
 from src.market_data import fetch_year_of_closes
@@ -50,11 +51,25 @@ def main() -> int:
         print(f"Warning: no price history for {', '.join(missing)}. They are left out of this forecast.")
 
     days_left = days_left_for(now)
+
+    print("Looking up earnings dates...")
+    try:
+        events = fetch_earnings_events([p["ticker"] for p in picks], now.date(), COMPETITION_END.date())
+    except Exception as error:
+        print(f"Warning: couldn't load earnings dates ({error}). The earnings model will run without jumps.")
+        events = None
+    earnings_days = {
+        t: str(e["next_reaction"]) for t, e in (events or {}).get("tickers", {}).items() if e.get("next_reaction")
+    }
+    if earnings_days:
+        print("Earnings inside the contest: " + ", ".join(f"{t} {d}" for t, d in sorted(earnings_days.items(), key=lambda x: x[1])))
     student_of = {p["ticker"]: p["student"] for p in picks}
     spy_return = snapshot.get(BENCHMARK_TICKER, {}).get("total_return")
 
     for key, (name, version, _, _) in MODELS.items():
-        forecast = run_forecast(current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED, model=key)
+        forecast = run_forecast(
+            current, year, days_left, n_sims=DEFAULT_SIMS, seed=DEFAULT_SEED, model=key, events=events
+        )
         rows = build_log_rows(
             forecast,
             student_of=student_of,
@@ -64,6 +79,7 @@ def main() -> int:
             n_sims=DEFAULT_SIMS,
             seed=DEFAULT_SEED,
             spy_return=spy_return,
+            earnings_days=earnings_days,
         )
         _, message = append_forecast(rows, force=args.force)
         top = rows.iloc[0]

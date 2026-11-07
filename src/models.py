@@ -15,6 +15,8 @@ holding that ticker's simulated total return on the last day.
   student_t        Fat tails. Like the bell curve, but extreme days happen more often.
   block_bootstrap  Replay random real WEEKS, so calm and stormy stretches stay together.
   market_factor    Each stock = beta x the market's move + its own separate noise.
+  earnings_jump    Like historical days, but on a pick's earnings day the move is drawn
+                   from that stock's own past earnings-day reactions (see src/earnings.py).
 """
 
 import numpy as np
@@ -24,6 +26,7 @@ from src.monte_carlo import simulate_final_returns
 
 TRADING_DAYS_PER_WEEK = 5
 STUDENT_T_DEGREES = 4  # lower = fatter tails; 4 is a common choice for daily stock returns
+EARNINGS_MIN_MOVES = 2  # need at least this many past earnings reactions to model a jump
 
 
 def fill_gaps(daily_returns: pd.DataFrame, rng: np.random.Generator) -> np.ndarray:
@@ -52,13 +55,13 @@ def _setup(current_returns: pd.Series, daily_returns: pd.DataFrame):
 
 
 # ---------- 1. Historical days (bootstrap) ----------
-def bootstrap(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None):
+def bootstrap(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
     """Pick random real days from the past year. Every stock gets that day's real move."""
     return simulate_final_returns(current_returns, daily_returns, days_left, n_sims=n_sims, seed=seed)
 
 
 # ---------- 2. Bell curve (GBM) ----------
-def gbm(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None):
+def gbm(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
     """Assume daily log-returns follow a bell curve (multivariate normal).
 
     Uses each stock's average and volatility from the past year, plus how
@@ -78,7 +81,7 @@ def gbm(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, marke
 
 
 # ---------- 3. Fat tails (Student-t) ----------
-def student_t(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None):
+def student_t(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
     """Like the bell curve, but with fatter tails: big up or down days are more common.
 
     Same average, same volatility, same correlations as the bell curve, so any
@@ -102,7 +105,7 @@ def student_t(current_returns, daily_returns, days_left, n_sims=10_000, seed=42,
 
 
 # ---------- 4. Historical weeks (block bootstrap) ----------
-def block_bootstrap(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None):
+def block_bootstrap(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
     """Replay random real 5-day stretches instead of single days.
 
     Markets have moods: a wild day is often followed by more wild days.
@@ -122,7 +125,7 @@ def block_bootstrap(current_returns, daily_returns, days_left, n_sims=10_000, se
 
 
 # ---------- 5. Market + own noise (factor model) ----------
-def market_factor(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None):
+def market_factor(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
     """Each stock's day = its usual drift + beta x the market's day + its own random noise.
 
     beta: how strongly the stock follows the S&P 500 (from a regression on the past year).
@@ -155,6 +158,52 @@ def market_factor(current_returns, daily_returns, days_left, n_sims=10_000, seed
     return _finish(current, growth, tickers)
 
 
+# ---------- 6. Earnings jumps ----------
+def earnings_jump(current_returns, daily_returns, days_left, n_sims=10_000, seed=42, market=None, events=None):
+    """Historical days, plus a realistic jump on each pick's upcoming earnings day.
+
+    1. Past earnings days are taken OUT of each stock's pool of normal days
+       (replaced by random ordinary days), so they aren't double-counted.
+    2. Normal days are replayed exactly like the historical-days model.
+    3. If a pick reports earnings before the contest ends, that one simulated day
+       gets a jump the SIZE of a random past earnings reaction, up or down with
+       equal chance (history tells us how big earnings moves are, not their direction).
+    Without earnings data this is identical to the historical-days model.
+    """
+    tickers, current = _setup(current_returns, daily_returns)
+    if days_left <= 0 or not tickers:
+        return _finish(current, np.ones((n_sims, len(tickers))), tickers)
+    rng = np.random.default_rng(seed)
+    info = (events or {}).get("tickers", {})
+    window = [pd.Timestamp(d) for d in (events or {}).get("window", [])][:days_left]
+
+    frame = daily_returns[tickers].copy()
+    if isinstance(frame.index, pd.DatetimeIndex) and frame.index.tz is not None:
+        frame.index = frame.index.tz_localize(None)
+    for ticker in tickers:
+        past = [pd.Timestamp(d) for d in info.get(ticker, {}).get("past_reactions", [])]
+        frame.loc[frame.index.isin(past), ticker] = np.nan  # removed, refilled below
+    history = fill_gaps(frame, rng)
+
+    picks = rng.integers(0, len(history), size=(n_sims, days_left))
+    simulated = history[picks]  # shape: (n_sims, days_left, tickers)
+
+    for j, ticker in enumerate(tickers):
+        event = info.get(ticker, {})
+        day, moves = event.get("next_reaction"), event.get("moves", [])
+        if day is None or len(moves) < EARNINGS_MIN_MOVES or pd.Timestamp(day) not in window:
+            continue
+        k = window.index(pd.Timestamp(day))
+        # Past earnings tell us how BIG the move tends to be, not which way it goes.
+        # So keep the size of a random past reaction and flip a fair coin for the direction.
+        sizes = rng.choice(np.abs(np.asarray(moves, dtype=float)), size=n_sims)
+        signs = rng.choice([-1.0, 1.0], size=n_sims)
+        simulated[:, k, j] = np.maximum(sizes * signs, -0.95)  # a stock can't fall more than 100%
+
+    growth = np.prod(1.0 + simulated, axis=1)
+    return _finish(current, growth, tickers)
+
+
 # Display name, short code for the log, function, plain-English one-liner.
 MODELS = {
     "bootstrap": ("Historical days", "bootstrap-v1", bootstrap,
@@ -167,4 +216,6 @@ MODELS = {
                         "Replays random real 5-day stretches, keeping calm and stormy streaks."),
     "market_factor": ("Market + own noise", "market-factor-v1", market_factor,
                       "Stocks are linked only through the S&P 500; everything else is independent."),
+    "earnings_jump": ("Earnings jumps", "earnings-jump-v1", earnings_jump,
+                      "Historical days, but each pick's earnings day uses its own past earnings moves."),
 }

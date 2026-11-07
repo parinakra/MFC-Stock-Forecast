@@ -15,7 +15,7 @@ Headline numbers (leader, favorite to win, S&P 500, picks beating the market) ab
 | **Quotes & valuation** | Price, bid, ask, bid–ask spread, trailing and forward P/E, market cap, beta, 52-week range |
 | **1-year performance** | Growth of $100 vs the S&P 500; volatility, max drawdown, best and worst day |
 | **Monte Carlo** | Win chance for every pick, likely finish range, win chance over time (from the daily log) |
-| **Model comparison** | Each model's favorite, and every pick's win chance under all five models |
+| **Model comparison** | Each model's favorite, every pick's win chance under all six models, and each pick's next earnings day |
 
 ## Methods
 
@@ -27,7 +27,7 @@ Headline numbers (leader, favorite to win, S&P 500, picks beating the market) ab
 
 **Monte Carlo (bootstrap):** for each remaining trading day, draw a random real trading day from the past year and apply *every* stock's return from that day. Resampling whole days keeps correlations between stocks (e.g. semiconductors moving together) and real-world fat tails, without assuming returns follow a bell curve. Repeat 10,000 times and count how often each pick finishes first.
 
-**Five models, side by side** (`src/models.py`). Each makes a different assumption about how returns behave:
+**Six models, side by side** (`src/models.py`). Each makes a different assumption about how returns behave:
 
 | Model | Assumption |
 | --- | --- |
@@ -36,12 +36,13 @@ Headline numbers (leader, favorite to win, S&P 500, picks beating the market) ab
 | Fat tails (Student-t, 4 d.o.f.) | Same means, volatilities and correlations as the bell curve, but more extreme days |
 | Historical weeks (block bootstrap) | Replay real 5-day stretches, preserving volatility clustering |
 | Market + own noise (factor model) | Each stock = alpha + beta × S&P 500 + its own independent noise |
+| Earnings jumps | Historical days, but on a pick's upcoming earnings day the move has the size of one of its past earnings reactions (last ~8 quarters), up or down with equal chance; past earnings days are removed from the normal-day pool |
 
 If the models agree, the forecast is robust; where they disagree, the answer depends on the assumption.
 
 **Forecast log:** every weekday after the 4pm ET close, a GitHub Action runs `log_forecast.py` and appends every model's forecast (10,000 simulations each, fixed seed, model version recorded) to `data/forecast_log.csv`. Rules: one forecast per model per trading day, past forecasts are never edited, and everything needed to reproduce a forecast is stored with it. When the contest ends, the log is used to evaluate the model: did each model favor the eventual winner, how early, and which model's probabilities were best calibrated?
 
-Limits: the past year may not resemble the next few weeks, earnings and news can move a stock far more than a typical day, and future dividends aren't modeled.
+Limits: the past year may not resemble the next few weeks; unscheduled news (like a trial result) can move a stock far more than a typical day; earnings dates come from Yahoo Finance and can be missing or change; future dividends aren't modeled.
 
 ## Project layout
 
@@ -56,7 +57,8 @@ Limits: the past year may not resemble the next few weeks, earnings and news can
 | `src/market_data.py` | Quotes, valuation fields, one year of history |
 | `src/risk.py` | Volatility, drawdown, period return |
 | `src/monte_carlo.py` | Simulation engine and win probabilities |
-| `src/models.py` | The five forecasting models |
+| `src/models.py` | The six forecasting models |
+| `src/earnings.py` | Earnings dates (with before-open / after-close timing) and past earnings-day moves |
 | `src/forecast.py` | Builds the forecast used by both the app and the logger |
 | `src/forecast_log.py` | Reads and appends the forecast log (one entry per trading day) |
 | `log_forecast.py` | Script that saves today's forecast |
@@ -83,6 +85,7 @@ python tests/test_portfolio.py
 python tests/test_analytics.py
 python tests/test_forecast_log.py
 python tests/test_models.py
+python tests/test_earnings.py
 ```
 
 Log today's forecast by hand (after 4pm ET / 1pm PT):

@@ -43,6 +43,7 @@ COLUMNS = [
     "median",          # typical finish
     "p95",             # good-case finish (95th percentile)
     "spy_return_so_far",  # S&P 500 benchmark at the same moment
+    "earnings_day",       # the pick's next earnings reaction day inside the contest, if known
 ]
 
 
@@ -66,6 +67,7 @@ def build_log_rows(
     n_sims: int,
     seed: int,
     spy_return: float | None,
+    earnings_days: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Turn a forecast table (one row per ticker) into log rows."""
     rows = forecast.reset_index().rename(columns={"index": "ticker"})
@@ -78,6 +80,7 @@ def build_log_rows(
     rows.insert(6, "days_left", days_left)
     rows["student"] = rows["ticker"].map(student_of)
     rows["spy_return_so_far"] = spy_return
+    rows["earnings_day"] = rows["ticker"].map(earnings_days or {})
     for column in ["return_so_far", "win_prob", "p05", "median", "p95", "spy_return_so_far"]:
         rows[column] = pd.to_numeric(rows[column]).round(6)
     return rows[COLUMNS]
