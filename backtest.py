@@ -18,7 +18,8 @@ import sys
 import pandas as pd
 import yfinance as yf
 
-from src.backtest import BACKTEST_MODELS, calibration, run_backtest, summarize
+from src import recalibration
+from src.backtest import BACKTEST_MODELS, CALIBRATION_BINS, calibration, run_backtest, summarize
 from src.config import BENCHMARK_TICKER, DATA_DIR
 from src.data_store import load_picks
 from src.models import MODELS
@@ -58,6 +59,22 @@ def main() -> int:
     results.to_csv(DATA_DIR / "backtest_results.csv", index=False)
     summary.to_csv(DATA_DIR / "backtest_summary.csv", index=False)
     calib.to_csv(DATA_DIR / "backtest_calibration.csv", index=False)
+    pairs.to_csv(DATA_DIR / "backtest_forecasts.csv", index=False)
+
+    print("\nFitting recalibration (older half of contests) and testing it (newer half)...")
+    recal, recal_tables = {}, []
+    for model in BACKTEST_MODELS:
+        model_forecasts = pairs[pairs["model"] == model]
+        params = recalibration.fit_and_test(model_forecasts)
+        recal[model] = params
+        test = model_forecasts[model_forecasts["window_start"] >= params["test_windows"][0]]
+        before = recalibration.calibration_table(test, 1.0, 0.0, CALIBRATION_BINS).assign(model=model, version="raw")
+        after = recalibration.calibration_table(
+            test, params["train_temperature"], params["train_weight"], CALIBRATION_BINS
+        ).assign(model=model, version="recalibrated")
+        recal_tables += [before, after]
+    recalibration.save(recal, DATA_DIR / "recalibration.json")
+    pd.concat(recal_tables, ignore_index=True).to_csv(DATA_DIR / "backtest_calibration_test.csv", index=False)
 
     names = {k: MODELS[k][0] for k in BACKTEST_MODELS}
     windows = results["window_start"].nunique()
@@ -70,7 +87,15 @@ def main() -> int:
             + (f"{r['leader_won']:>12.0%}" if pd.notna(r["leader_won"]) else f"{'—':>12}")
             + f"{r['brier_skill']:>13.1%}"
         )
-    print("\nSaved data/backtest_results.csv, data/backtest_summary.csv, data/backtest_calibration.csv")
+    print(f"\n{'Model':<20}{'Temperature':>12}{'Floor':>8}{'Test log loss':>16}{'Test Brier':>14}   (before -> after, newer half only)")
+    for model, r in recal.items():
+        print(
+            f"{names[model]:<20}{r['temperature']:>12.2f}{r['weight']:>8.1%}"
+            f"   {r['test_log_loss_before']:.3f} -> {r['test_log_loss_after']:.3f}"
+            f"   {r['test_brier_before']:.4f} -> {r['test_brier_after']:.4f}"
+            f"   {'helps' if r['helps'] else 'does NOT help'}"
+        )
+    print("\nSaved data/backtest_*.csv and data/recalibration.json")
     return 0
 
 

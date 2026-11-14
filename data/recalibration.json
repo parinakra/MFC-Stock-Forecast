@@ -1,0 +1,97 @@
+{
+  "bootstrap": {
+    "temperature": 1.3718,
+    "weight": 0.05,
+    "train_temperature": 1.2446,
+    "train_weight": 0.0,
+    "train_windows": [
+      "2022-11-15",
+      "2024-10-15"
+    ],
+    "test_windows": [
+      "2024-10-29",
+      "2026-09-30"
+    ],
+    "test_log_loss_before": 2.613568229122195,
+    "test_log_loss_after": 2.5041388183307176,
+    "test_brier_before": 0.8002857823129251,
+    "test_brier_after": 0.7877077393110202,
+    "helps": true
+  },
+  "gbm": {
+    "temperature": 1.4402,
+    "weight": 0.05,
+    "train_temperature": 1.3067,
+    "train_weight": 0.0,
+    "train_windows": [
+      "2022-11-15",
+      "2024-10-15"
+    ],
+    "test_windows": [
+      "2024-10-29",
+      "2026-09-30"
+    ],
+    "test_log_loss_before": 2.5634921896302325,
+    "test_log_loss_after": 2.443660879067808,
+    "test_brier_before": 0.7984362091836735,
+    "test_brier_after": 0.78272359540297,
+    "helps": true
+  },
+  "student_t": {
+    "temperature": 1.512,
+    "weight": 0.03,
+    "train_temperature": 1.3067,
+    "train_weight": 0.0,
+    "train_windows": [
+      "2022-11-15",
+      "2024-10-15"
+    ],
+    "test_windows": [
+      "2024-10-29",
+      "2026-09-30"
+    ],
+    "test_log_loss_before": 2.566475016156336,
+    "test_log_loss_after": 2.41800180173498,
+    "test_brier_before": 0.8040328469387755,
+    "test_brier_after": 0.7845086708594606,
+    "helps": true
+  },
+  "block_bootstrap": {
+    "temperature": 1.3718,
+    "weight": 0.08,
+    "train_temperature": 1.3067,
+    "train_weight": 0.0,
+    "train_windows": [
+      "2022-11-15",
+      "2024-10-15"
+    ],
+    "test_windows": [
+      "2024-10-29",
+      "2026-09-30"
+    ],
+    "test_log_loss_before": 2.693696859763546,
+    "test_log_loss_after": 2.58035996521943,
+    "test_brier_before": 0.8039297576530611,
+    "test_brier_after": 0.7893361172812166,
+    "helps": true
+  },
+  "market_factor": {
+    "temperature": 1.2446,
+    "weight": 0.08,
+    "train_temperature": 1.0756,
+    "train_weight": 0.03,
+    "train_windows": [
+      "2022-11-15",
+      "2024-10-15"
+    ],
+    "test_windows": [
+      "2024-10-29",
+      "2026-09-30"
+    ],
+    "test_log_loss_before": 2.582742477110006,
+    "test_log_loss_after": 2.474202368222272,
+    "test_brier_before": 0.7987612448979592,
+    "test_brier_after": 0.7923915687302658,
+    "helps": true
+  }
+}

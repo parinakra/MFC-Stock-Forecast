@@ -144,8 +144,10 @@ def run_backtest(closes: pd.DataFrame, benchmark: str, models=BACKTEST_MODELS, c
                     "leader_won": (result["leader"] == result["winner"]) if result["leader"] else None,
                     **s,
                 })
+                forecast_id = f"{result['window_start'].date()}|{days_left}|{model}"
                 for ticker, p in result["probs"].items():
-                    pairs.append({"model": model, "days_left": days_left, "prob": float(p),
+                    pairs.append({"forecast_id": forecast_id, "window_start": str(result["window_start"].date()),
+                                  "model": model, "days_left": days_left, "ticker": ticker, "prob": float(p),
                                   "won": int(ticker == result["winner"])})
     return pd.DataFrame(rows), pd.DataFrame(pairs)
 

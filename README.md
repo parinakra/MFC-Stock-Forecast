@@ -45,6 +45,8 @@ If the models agree, the forecast is robust; where they disagree, the answer dep
 
 **Backtest** (`backtest.py`, `src/backtest.py`): the same picks are replayed in past 24-trading-day contests (one starting every 10 trading days over ~4 years). At 24, 14 and 5 days left, each model forecasts using only prices up to that day, then the forecasts are scored against who actually won: chance given to the winner, how often the favorite won (vs. how often the current leader won), Brier skill vs. blind guessing, log loss, and calibration (predicted vs. actual win rates by probability range). Limits: windows overlap and reuse the same stocks; the picks were chosen in 2026, so their history isn't a random sample; the earnings model isn't backtested.
 
+**Recalibration** (`src/recalibration.py`): the backtest showed overconfidence, so odds can be adjusted with two knobs fitted to the backtest: a temperature T (p → p^(1/T), rescaled; T > 1 pulls favorites down) and a small floor w blended in from equal odds (so no pick is ever at a true 0%). The knobs are fitted on the older half of past contests and tested on the newer half; the app shows calibrated odds next to the model's only if recalibration improved log loss on those unseen contests. The official logged forecasts are never changed.
+
 Limits: the past year may not resemble the next few weeks; unscheduled news (like a trial result) can move a stock far more than a typical day; earnings dates come from Yahoo Finance and can be missing or change; future dividends aren't modeled.
 
 ## Project layout
@@ -62,7 +64,8 @@ Limits: the past year may not resemble the next few weeks; unscheduled news (lik
 | `src/monte_carlo.py` | Simulation engine and win probabilities |
 | `src/models.py` | The six forecasting models |
 | `src/backtest.py` | Backtest engine: past windows, no-lookahead forecasts, scoring, calibration |
-| `backtest.py` | Runs the backtest and saves `data/backtest_*.csv` |
+| `backtest.py` | Runs the backtest, fits recalibration, saves `data/backtest_*.csv` and `data/recalibration.json` |
+| `src/recalibration.py` | Temperature + floor recalibration, fitted and tested out of sample |
 | `src/earnings.py` | Earnings dates (with before-open / after-close timing) and past earnings-day moves |
 | `src/forecast.py` | Builds the forecast used by both the app and the logger |
 | `src/forecast_log.py` | Reads and appends the forecast log (one entry per trading day) |
@@ -92,6 +95,7 @@ python tests/test_forecast_log.py
 python tests/test_models.py
 python tests/test_earnings.py
 python tests/test_backtest.py
+python tests/test_recalibration.py
 ```
 
 Run the backtest (a few minutes):

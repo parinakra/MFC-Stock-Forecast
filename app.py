@@ -12,6 +12,7 @@ from src.config import BENCHMARK_NAME, BENCHMARK_TICKER, COMPETITION_END, DATA_D
 from src.data_store import load_picks
 from src.earnings import fetch_earnings_events
 from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, compare_models, current_returns, days_left_for, run_forecast
+from src import recalibration
 from src.forecast_log import load_log
 from src.market_data import fetch_quotes, fetch_year_of_closes
 from src.models import MODELS
@@ -79,6 +80,9 @@ spy = snapshot.get(BENCHMARK_TICKER, {}).get("total_return")
 days_left = days_left_for(now)
 current = current_returns(picks, snapshot, year)
 forecast = get_forecast(current, year, days_left) if not year.empty else pd.DataFrame()
+recal_params = (recalibration.load(DATA_DIR / "recalibration.json") or {}).get("bootstrap")
+if recal_params and recal_params.get("helps") and not forecast.empty:
+    forecast["calibrated"] = recalibration.apply(forecast["win_prob"], recal_params["temperature"], recal_params["weight"])
 
 # ---------- Header ----------
 title_col, button_col = st.columns([5, 1])
@@ -126,7 +130,9 @@ if not ranked.empty:
     k1.metric("Leader", f"{leader['Student']} · {leader['Ticker']}", f"{leader['Return']:+.2f}%")
 if not forecast.empty:
     fav = forecast.index[0]
-    k2.metric("Favorite to win", f"{student_of[fav]} · {fav}", f"{forecast['win_prob'].iloc[0]:.1%} chance", delta_color="off")
+    calibrated_note = f" · {forecast['calibrated'].iloc[0]:.1%} calibrated" if "calibrated" in forecast else ""
+    k2.metric("Favorite to win", f"{student_of[fav]} · {fav}", f"{forecast['win_prob'].iloc[0]:.1%} chance{calibrated_note}",
+              delta_color="off")
 k3.metric(BENCHMARK_NAME, f"{spy:+.2%}" if spy is not None else "—")
 if spy is not None and not ranked.empty:
     k4.metric("Beating the S&P", f"{int((ranked['vs S&P 500'] > 0).sum())} of {len(ranked)}")
@@ -252,19 +258,32 @@ with perf_tab:
 
 with mc_tab:
     if not forecast.empty:
-        bars_data = pd.DataFrame(
-            {"Pick": [f"{student_of[t]} · {t}" for t in forecast.index], "Win chance": forecast["win_prob"].values}
+        picks_label = [f"{student_of[t]} · {t}" for t in forecast.index]
+        versions = {"Model": forecast["win_prob"]}
+        if "calibrated" in forecast:
+            versions["Calibrated"] = forecast["calibrated"]
+        bars_data = pd.concat(
+            [pd.DataFrame({"Pick": picks_label, "Win chance": v.values, "Version": name}) for name, v in versions.items()]
         )
-        bars = alt.Chart(bars_data).mark_bar(color=COLORS[0], cornerRadiusEnd=4, height=16).encode(
-            y=alt.Y("Pick:N", sort="-x", title=None),
+        order = picks_label  # already sorted by the model's win chance
+        bars = alt.Chart(bars_data).mark_bar(cornerRadiusEnd=4, height=10).encode(
+            y=alt.Y("Pick:N", sort=order, title=None),
+            yOffset=alt.YOffset("Version:N", sort=list(versions)),
             x=alt.X("Win chance:Q", title="Win chance", axis=alt.Axis(format=".0%", tickCount=5)),
-            tooltip=["Pick:N", alt.Tooltip("Win chance:Q", format=".1%")],
+            color=alt.Color("Version:N", title=None, scale=alt.Scale(domain=list(versions), range=COLORS[: len(versions)]),
+                            legend=alt.Legend(orient="top")),
+            tooltip=["Pick:N", "Version:N", alt.Tooltip("Win chance:Q", format=".1%")],
         )
-        labels = bars.mark_text(align="left", dx=4, color=MARKET_GREY).encode(text=alt.Text("Win chance:Q", format=".1%"))
-        st.altair_chart((bars + labels).properties(height=26 * len(bars_data) + 40), use_container_width=True)
+        labels = bars.mark_text(align="left", dx=4, color=MARKET_GREY, fontSize=10).encode(
+            text=alt.Text("Win chance:Q", format=".1%")
+        )
+        st.altair_chart((bars + labels).properties(height=30 * len(picks_label) + 60), use_container_width=True)
     if not forecast.empty:
-        finish = forecast[["return_so_far", "p05", "median", "p95", "win_prob"]].copy() * 100
-        finish.columns = ["Return now", "Bad case (5%)", "Typical", "Good case (95%)", "Win chance"]
+        finish_cols = ["return_so_far", "p05", "median", "p95", "win_prob"] + (["calibrated"] if "calibrated" in forecast else [])
+        finish = forecast[finish_cols].copy() * 100
+        finish.columns = ["Return now", "Bad case (5%)", "Typical", "Good case (95%)", "Win chance"] + (
+            ["Win chance (calibrated)"] if "calibrated" in forecast else []
+        )
         finish.insert(0, "Student", [student_of[t] for t in finish.index])
         finish.insert(1, "Ticker", finish.index)
         st.dataframe(
@@ -272,7 +291,8 @@ with mc_tab:
             hide_index=True,
             use_container_width=True,
             column_config={c: st.column_config.NumberColumn(format="%+.1f%%") for c in finish.columns[2:6]}
-            | {"Win chance": st.column_config.NumberColumn(format="%.1f%%")},
+            | {"Win chance": st.column_config.NumberColumn(format="%.1f%%"),
+               "Win chance (calibrated)": st.column_config.NumberColumn(format="%.1f%%")},
         )
     st.subheader("Win chance over time")
     if official_log["forecast_date"].nunique() < 2 if not official_log.empty else True:
@@ -408,25 +428,69 @@ with backtest_tab:
         )
 
         st.subheader("Calibration")
-        calib = pd.read_csv(calib_path)
-        calib["Model"] = calib["model"].map(names)
+        test_path = DATA_DIR / "backtest_calibration_test.csv"
+        recal_all = recalibration.load(DATA_DIR / "recalibration.json")
+        if recal_all and test_path.exists():
+            params_table = pd.DataFrame([
+                {
+                    "Model": names[m],
+                    "Temperature": r["temperature"],
+                    "Floor": r["weight"] * 100,
+                    "Log loss before": r["test_log_loss_before"],
+                    "Log loss after": r["test_log_loss_after"],
+                    "Brier before": r["test_brier_before"],
+                    "Brier after": r["test_brier_after"],
+                    "Helps": "Yes" if r.get("helps") else "No",
+                }
+                for m, r in recal_all.items()
+            ])
+            first = next(iter(recal_all.values()))
+            if not recal_all.get("bootstrap", {}).get("helps"):
+                st.caption("Recalibration didn't improve the official model on unseen contests, so live odds are left as they are.")
+            st.caption(
+                f"Fitted on {first['train_windows'][0]} to {first['train_windows'][1]}; "
+                f"tested on {first['test_windows'][0]} to {first['test_windows'][1]} (contests the fit never saw)."
+            )
+            st.dataframe(
+                params_table,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Temperature": st.column_config.NumberColumn(format="%.2f"),
+                    "Floor": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Log loss before": st.column_config.NumberColumn(format="%.3f"),
+                    "Log loss after": st.column_config.NumberColumn(format="%.3f"),
+                    "Brier before": st.column_config.NumberColumn(format="%.4f"),
+                    "Brier after": st.column_config.NumberColumn(format="%.4f"),
+                },
+            )
+            calib = pd.read_csv(test_path)
+            calib["Model"] = calib["model"].map(names)
+            calib["Version"] = calib["version"].map({"raw": "Model", "recalibrated": "Calibrated"})
+        else:
+            calib = pd.read_csv(calib_path)
+            calib["Model"] = calib["model"].map(names)
+            calib["Version"] = "Model"
         model_names = [names[k] for k in MODELS if names[k] in set(calib["Model"])]
         chosen_model = st.selectbox("Model", model_names, index=0)
         points = calib[calib["Model"] == chosen_model].copy()
+        version_order = [v for v in ["Model", "Calibrated"] if v in set(points["Version"])]
         top = float(max(points["mean_pred"].max(), points["observed"].max(), 0.05)) * 1.1
         axis = alt.Axis(format=".0%", tickCount=6)
         diagonal = alt.Chart(pd.DataFrame({"x": [0, top], "y": [0, top]})).mark_line(
             color="#c3c2b7", strokeDash=[6, 4]
         ).encode(x=alt.X("x:Q", scale=alt.Scale(domain=[0, top])), y=alt.Y("y:Q", scale=alt.Scale(domain=[0, top])))
-        dots = alt.Chart(points).mark_circle(color=COLORS[0], opacity=0.9, stroke="white", strokeWidth=1).encode(
+        dots = alt.Chart(points).mark_circle(opacity=0.9, stroke="white", strokeWidth=1).encode(
             x=alt.X("mean_pred:Q", title="Predicted chance of winning", axis=axis, scale=alt.Scale(domain=[0, top])),
             y=alt.Y("observed:Q", title="How often those picks actually won", axis=axis, scale=alt.Scale(domain=[0, top])),
+            color=alt.Color("Version:N", title=None, scale=alt.Scale(domain=version_order, range=COLORS[: len(version_order)]),
+                            legend=alt.Legend(orient="top")),
             size=alt.Size("count:Q", title="Forecasts", scale=alt.Scale(range=[60, 600]), legend=alt.Legend(orient="top")),
-            tooltip=[alt.Tooltip("bin:N", title="Range"), alt.Tooltip("mean_pred:Q", title="Predicted", format=".1%"),
+            tooltip=["Version:N", alt.Tooltip("bin:N", title="Range"), alt.Tooltip("mean_pred:Q", title="Predicted", format=".1%"),
                      alt.Tooltip("observed:Q", title="Actually won", format=".1%"), alt.Tooltip("count:Q", title="Forecasts")],
         )
         st.altair_chart((diagonal + dots).properties(height=420), use_container_width=True)
-        shown = points[["bin", "mean_pred", "observed", "count"]].rename(
+        shown = points[["Version", "bin", "mean_pred", "observed", "count"]].rename(
             columns={"bin": "Range", "mean_pred": "Predicted", "observed": "Actually won", "count": "Forecasts"}
         )
         shown["Predicted"] *= 100
