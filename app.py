@@ -8,7 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from src.config import BENCHMARK_NAME, BENCHMARK_TICKER, COMPETITION_END, PRICE_CACHE_SECONDS
+from src.config import BENCHMARK_NAME, BENCHMARK_TICKER, COMPETITION_END, DATA_DIR, PRICE_CACHE_SECONDS
 from src.data_store import load_picks
 from src.earnings import fetch_earnings_events
 from src.forecast import DEFAULT_SEED, DEFAULT_SIMS, MODEL_VERSION, compare_models, current_returns, days_left_for, run_forecast
@@ -132,8 +132,9 @@ if spy is not None and not ranked.empty:
     k4.metric("Beating the S&P", f"{int((ranked['vs S&P 500'] > 0).sum())} of {len(ranked)}")
 
 # ---------- Tabs ----------
-(leaderboard_tab, returns_tab, quotes_tab, perf_tab, mc_tab, models_tab) = st.tabs(
-    ["Leaderboard", "Returns over time", "Quotes & valuation", "1-year performance", "Monte Carlo", "Model comparison"]
+(leaderboard_tab, returns_tab, quotes_tab, perf_tab, mc_tab, models_tab, backtest_tab) = st.tabs(
+    ["Leaderboard", "Returns over time", "Quotes & valuation", "1-year performance", "Monte Carlo", "Model comparison",
+     "Backtest"]
 )
 
 with leaderboard_tab:
@@ -365,3 +366,70 @@ with models_tab:
             column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in names}
             | {"Spread": st.column_config.NumberColumn(format="%.1f pts")},
         )
+
+
+# ---------- Backtest ----------
+with backtest_tab:
+    summary_path, calib_path = DATA_DIR / "backtest_summary.csv", DATA_DIR / "backtest_calibration.csv"
+    results_path = DATA_DIR / "backtest_results.csv"
+    if not summary_path.exists():
+        st.caption("No backtest yet. Run `python backtest.py` in the project folder.")
+    else:
+        summary = pd.read_csv(summary_path)
+        results_bt = pd.read_csv(results_path)
+        names = {k: MODELS[k][0] for k in MODELS}
+        summary["Model"] = summary["model"].map(names)
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Past contests", f"{results_bt['window_start'].nunique()}")
+        k2.metric("From", str(results_bt["window_start"].min()))
+        k3.metric("To", str(results_bt["window_end"].max()))
+
+        table = summary.rename(columns={
+            "days_left": "Days left", "windows": "Contests", "avg_winner_prob": "Chance given to winner",
+            "blind_guess_prob": "Blind guess", "favorite_won": "Favorite won", "leader_won": "Leader won",
+            "brier_skill": "Skill vs blind guess", "log_loss": "Log loss",
+        })[["Days left", "Model", "Contests", "Chance given to winner", "Blind guess", "Favorite won", "Leader won",
+            "Skill vs blind guess", "Log loss"]]
+        for c in ["Chance given to winner", "Blind guess", "Favorite won", "Skill vs blind guess"]:
+            table[c] = table[c] * 100
+        # No leader exists at the start of a contest, so show a dash there instead of "None".
+        table["Leader won"] = table["Leader won"].map(lambda v: "—" if pd.isna(v) else f"{v:.0%}")
+        pct1 = st.column_config.NumberColumn(format="%.1f%%")
+        st.dataframe(
+            table,
+            hide_index=True,
+            use_container_width=True,
+            height=35 * (len(table) + 1) + 3,
+            column_config={
+                "Chance given to winner": pct1, "Blind guess": pct1, "Skill vs blind guess": pct1,
+                "Favorite won": st.column_config.NumberColumn(format="%.0f%%"),
+                "Log loss": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+
+        st.subheader("Calibration")
+        calib = pd.read_csv(calib_path)
+        calib["Model"] = calib["model"].map(names)
+        model_names = [names[k] for k in MODELS if names[k] in set(calib["Model"])]
+        chosen_model = st.selectbox("Model", model_names, index=0)
+        points = calib[calib["Model"] == chosen_model].copy()
+        top = float(max(points["mean_pred"].max(), points["observed"].max(), 0.05)) * 1.1
+        axis = alt.Axis(format=".0%", tickCount=6)
+        diagonal = alt.Chart(pd.DataFrame({"x": [0, top], "y": [0, top]})).mark_line(
+            color="#c3c2b7", strokeDash=[6, 4]
+        ).encode(x=alt.X("x:Q", scale=alt.Scale(domain=[0, top])), y=alt.Y("y:Q", scale=alt.Scale(domain=[0, top])))
+        dots = alt.Chart(points).mark_circle(color=COLORS[0], opacity=0.9, stroke="white", strokeWidth=1).encode(
+            x=alt.X("mean_pred:Q", title="Predicted chance of winning", axis=axis, scale=alt.Scale(domain=[0, top])),
+            y=alt.Y("observed:Q", title="How often those picks actually won", axis=axis, scale=alt.Scale(domain=[0, top])),
+            size=alt.Size("count:Q", title="Forecasts", scale=alt.Scale(range=[60, 600]), legend=alt.Legend(orient="top")),
+            tooltip=[alt.Tooltip("bin:N", title="Range"), alt.Tooltip("mean_pred:Q", title="Predicted", format=".1%"),
+                     alt.Tooltip("observed:Q", title="Actually won", format=".1%"), alt.Tooltip("count:Q", title="Forecasts")],
+        )
+        st.altair_chart((diagonal + dots).properties(height=420), use_container_width=True)
+        shown = points[["bin", "mean_pred", "observed", "count"]].rename(
+            columns={"bin": "Range", "mean_pred": "Predicted", "observed": "Actually won", "count": "Forecasts"}
+        )
+        shown["Predicted"] *= 100
+        shown["Actually won"] *= 100
+        st.dataframe(shown, hide_index=True, use_container_width=True,
+                     column_config={"Predicted": pct1, "Actually won": pct1})

@@ -6,7 +6,7 @@ Version 1 is the leaderboard I run for the **UCI Math Finance Club** 5-week stoc
 
 ## Features
 
-Headline numbers (leader, favorite to win, S&P 500, picks beating the market) above six tabs:
+Headline numbers (leader, favorite to win, S&P 500, picks beating the market) above seven tabs:
 
 | Tab | What it shows |
 | --- | --- |
@@ -16,6 +16,7 @@ Headline numbers (leader, favorite to win, S&P 500, picks beating the market) ab
 | **1-year performance** | Growth of $100 vs the S&P 500; volatility, max drawdown, best and worst day |
 | **Monte Carlo** | Win chance for every pick, likely finish range, win chance over time (from the daily log) |
 | **Model comparison** | Each model's favorite, every pick's win chance under all six models, and each pick's next earnings day |
+| **Backtest** | How each model's odds would have scored in ~100 past pretend contests, plus a calibration chart |
 
 ## Methods
 
@@ -42,6 +43,8 @@ If the models agree, the forecast is robust; where they disagree, the answer dep
 
 **Forecast log:** every weekday after the 4pm ET close, a GitHub Action runs `log_forecast.py` and appends every model's forecast (10,000 simulations each, fixed seed, model version recorded) to `data/forecast_log.csv`. Rules: one forecast per model per trading day, past forecasts are never edited, and everything needed to reproduce a forecast is stored with it. When the contest ends, the log is used to evaluate the model: did each model favor the eventual winner, how early, and which model's probabilities were best calibrated?
 
+**Backtest** (`backtest.py`, `src/backtest.py`): the same picks are replayed in past 24-trading-day contests (one starting every 10 trading days over ~4 years). At 24, 14 and 5 days left, each model forecasts using only prices up to that day, then the forecasts are scored against who actually won: chance given to the winner, how often the favorite won (vs. how often the current leader won), Brier skill vs. blind guessing, log loss, and calibration (predicted vs. actual win rates by probability range). Limits: windows overlap and reuse the same stocks; the picks were chosen in 2026, so their history isn't a random sample; the earnings model isn't backtested.
+
 Limits: the past year may not resemble the next few weeks; unscheduled news (like a trial result) can move a stock far more than a typical day; earnings dates come from Yahoo Finance and can be missing or change; future dividends aren't modeled.
 
 ## Project layout
@@ -58,6 +61,8 @@ Limits: the past year may not resemble the next few weeks; unscheduled news (lik
 | `src/risk.py` | Volatility, drawdown, period return |
 | `src/monte_carlo.py` | Simulation engine and win probabilities |
 | `src/models.py` | The six forecasting models |
+| `src/backtest.py` | Backtest engine: past windows, no-lookahead forecasts, scoring, calibration |
+| `backtest.py` | Runs the backtest and saves `data/backtest_*.csv` |
 | `src/earnings.py` | Earnings dates (with before-open / after-close timing) and past earnings-day moves |
 | `src/forecast.py` | Builds the forecast used by both the app and the logger |
 | `src/forecast_log.py` | Reads and appends the forecast log (one entry per trading day) |
@@ -86,6 +91,13 @@ python tests/test_analytics.py
 python tests/test_forecast_log.py
 python tests/test_models.py
 python tests/test_earnings.py
+python tests/test_backtest.py
+```
+
+Run the backtest (a few minutes):
+
+```bash
+python backtest.py
 ```
 
 Log today's forecast by hand (after 4pm ET / 1pm PT):
@@ -96,7 +108,6 @@ python log_forecast.py
 
 ## Ideas for next versions
 
-- Backtest: how would each pick have done in past 5-week windows?
 - Sharpe ratio and correlation heatmap across picks
 - Fan chart of simulated paths for one stock
 - Deploy publicly on Streamlit Community Cloud
